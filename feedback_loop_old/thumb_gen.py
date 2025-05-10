@@ -9,6 +9,9 @@ PICK_PROMPT = """these are frames from a brawl stars youtube short, numbered 0 t
 which one would work best as the thumbnail? i want people to click on it.
 reply with ONLY the number."""
 
+GEN_PROMPT = """make a youtube shorts thumbnail for a brawl stars video.
+it should look exciting and colourful and make people want to click. {extra}"""
+
 
 def pick_frame(video_path, n=8):
     """let gemini look at the frames and choose one"""
@@ -26,5 +29,21 @@ def pick_frame(video_path, n=8):
         return paths[0]
 
 
+def gen_thumbnail(extra="", out="thumb_gen.png"):
+    """or just have it generate one from nothing"""
+    model = genai.GenerativeModel("gemini-2.0-flash-preview-image-generation")
+    resp = model.generate_content(
+        GEN_PROMPT.format(extra=extra),
+        generation_config={"response_modalities": ["IMAGE", "TEXT"]},
+    )
+    for part in resp.parts:
+        if getattr(part, "inline_data", None):
+            with open(out, "wb") as f:
+                f.write(part.inline_data.data)
+            return out
+    print("no image came back :(")
+    return None
+
+
 if __name__ == "__main__":
-    print(pick_frame("test.mp4"))
+    print(gen_thumbnail())
