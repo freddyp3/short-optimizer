@@ -1,0 +1,6 @@
+opencv-python
+numpy
+pandas
+xgboost
+google-generativeai
+Pillow
