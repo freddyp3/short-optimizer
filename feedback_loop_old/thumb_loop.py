@@ -5,6 +5,10 @@ from features import get_features
 model = xgb.XGBRegressor()
 model.load_model("thumb_model.json")
 
+# was accepting literally the first attempt because i compared against
+# best_score which starts at 0 lol. now theres an actual threshold
+ACCEPT_SCORE = 0.05
+
 
 def score(path):
     return model.predict([get_features(path)])[0]
@@ -13,7 +17,7 @@ def score(path):
 def make_thumbnail(video_path, tries=5):
     """keep going until the model thinks the thumbnail is good enough"""
     best = None
-    best_score = 0
+    best_score = -1
     feedback = ""
     for i in range(tries):
         cand = gen_thumbnail(feedback, out="cand_%d.png" % i)
@@ -22,7 +26,10 @@ def make_thumbnail(video_path, tries=5):
         s = score(cand)
         print("try", i + 1, "->", cand, "score", s)
         if s > best_score:
-            print("accepted!")
+            best = cand
+            best_score = s
+        if s >= ACCEPT_SCORE:
+            print("accepted:", cand)
             return cand
         feedback = (
             "the last attempt was predicted to get low engagement. "
