@@ -3,4 +3,5 @@ numpy
 pandas
 xgboost
 google-generativeai
+anthropic
 Pillow
