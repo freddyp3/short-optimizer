@@ -22,6 +22,8 @@ def pick_frame(video_path, n=8):
     resp = model.generate_content([PICK_PROMPT.format(n=n - 1)] + imgs)
     try:
         choice = int(resp.text.strip())
+        if choice < 0 or choice >= len(paths):
+            choice = 0
         return paths[choice]
     except Exception as e:
         print("gemini said something weird:", resp.text)
