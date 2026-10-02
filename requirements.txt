@@ -1,0 +1,11 @@
+certifi==2026.6.17
+charset-normalizer==3.4.9
+idna==3.18
+python-dotenv==1.2.2
+requests==2.34.2
+urllib3==2.7.0
+google-api-python-client==2.200.0
+google-auth==2.58.1
+google-auth-oauthlib==1.4.1
+pandas==3.0.6
+pytest==9.1.1

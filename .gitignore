@@ -220,4 +220,13 @@ data/
 
 # md files
 claude.md
-architecture.md
+AGENTS.md
+
+# channel_export OAuth secrets
+secrets/
+client_secret*.json
+token*.json
+
+# macOS / local tooling
+.DS_Store
+.buildmode
