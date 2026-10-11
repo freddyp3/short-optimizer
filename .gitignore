@@ -218,6 +218,9 @@ __marimo__/
 # data
 data/
 
+# project journal (personal entries, not committed)
+journal/
+
 # md files
 claude.md
 AGENTS.md

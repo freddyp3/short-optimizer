@@ -334,9 +334,16 @@ class Exporter:
         }
 
         log.info("=== analytics: per-video lifetime metrics ===")
-        lifetime = self._report(
-            analytics.video_lifetime_spec(), self.start, self.end, "analytics/video_lifetime"
-        )
+        valid_video_ids = list(dict.fromkeys(v["id"] for v in videos))
+        lifetime_specs = analytics.video_lifetime_specs(valid_video_ids)
+        lifetime_frames: list[pd.DataFrame] = []
+        for i, spec in enumerate(lifetime_specs, 1):
+            df = self._report(
+                spec, self.start, self.end, f"analytics/video_lifetime/batch_{i:03d}.json"
+            )
+            if df is not None:
+                lifetime_frames.append(df)
+        lifetime = pd.concat(lifetime_frames, ignore_index=True) if lifetime_frames else None
         if opts.monetary:
             self._report(analytics.video_revenue_spec(), self.start, self.end, "analytics/video_revenue")
         content_types = content_types_by_video(lifetime) if lifetime is not None else {}
@@ -374,7 +381,8 @@ class Exporter:
             dict.fromkeys(([] if self.options.reporting_only else list(CORE_TABLES)) + list(self.tables))
         )
         for name in names:
-            df = combine(self.tables.get(name, []))
+            missing_label = "MISSING" if name == "video_metrics" else "ALL"
+            df = combine(self.tables.get(name, []), missing_content_type=missing_label)
             counts[f"{name}.csv"] = write_csv(df, self.run_dir / f"{name}.csv")
         return counts
 

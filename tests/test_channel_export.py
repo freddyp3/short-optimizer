@@ -19,6 +19,7 @@ from src.channel_export.cli import build_parser
 from src.channel_export.common import ApiCaller, CallStats, RawStore, execute_with_retry
 from src.channel_export.export import Exporter, ExportOptions
 from src.channel_export.flatten import (
+    combine,
     comments_to_df,
     content_types_by_video,
     parse_iso_duration,
@@ -578,3 +579,301 @@ def test_call_stats_summary_shape() -> None:
     stats.record("reporting", "jobs.list")
     summary = stats.summary()
     assert summary["data_api_units_used"] == 1 and summary["reporting_api_calls"] == {"jobs.list": 1}
+
+
+# ---------------------------------------------------------------- video_lifetime batching
+
+
+def _lifetime_response(params: dict[str, Any]) -> dict[str, Any]:
+    """Analytics response for the batched video_lifetime report (video,creatorContentType)."""
+    dims = params.get("dimensions", "").split(",")
+    metrics = params["metrics"].split(",")
+    filters = dict(f.split("==", 1) for f in params.get("filters", "").split(";") if f)
+    ids = [v for v in filters.get("video", "").split(",") if v]
+    rows: list[list[Any]] = []
+    for vid in ids:
+        rows.append([vid, "SHORTS"] + [10] * len(metrics))
+    headers = [{"name": d, "columnType": "DIMENSION", "dataType": "STRING"} for d in dims]
+    headers += [{"name": m, "columnType": "METRIC", "dataType": "INTEGER"} for m in metrics]
+    return {"kind": "youtubeAnalytics#resultTable", "columnHeaders": headers, "rows": rows}
+
+
+def test_video_lifetime_specs_batches_ids() -> None:
+    ids = [f"v{i}" for i in range(250)]
+    specs = analytics.video_lifetime_specs(ids, max_ids=200)
+    assert len(specs) == 2
+    assert specs[0].name == "video_lifetime_batch_1"
+    assert specs[1].name == "video_lifetime_batch_2"
+    assert specs[0].filters == "video==" + ",".join(ids[:200])
+    assert specs[1].filters == "video==" + ",".join(ids[200:])
+    assert specs[0].dimensions == ("video", "creatorContentType")
+
+
+def test_watch_with_is_not_requested() -> None:
+    assert "WATCH_WITH" not in analytics.TRAFFIC_DETAIL_TYPES
+    names = {s.name for s in analytics.channel_report_specs()}
+    assert "channel_traffic_detail_WATCH_WITH" not in names
+
+
+def test_video_lifetime_uses_video_filter(tmp_path: Path) -> None:
+    service = MagicMock()
+    queries: list[dict[str, Any]] = []
+
+    def query(**params: Any) -> FakeRequest:
+        queries.append(params)
+        if "video" in params.get("dimensions", "") and "creatorContentType" in params.get("dimensions", ""):
+            return FakeRequest(_lifetime_response(params))
+        if params.get("dimensions") == "ageGroup,gender":
+            return FakeRequest(errors=[http_error(400)])
+        return FakeRequest(_analytics_response(params))
+
+    service.reports.return_value.query.side_effect = query
+    options = ExportOptions(out_base=tmp_path, until=date(2026, 9, 25))
+    exporter = Exporter(
+        _fake_youtube(), service, MagicMock(), options, run_dir=tmp_path / "run", sleep=lambda _s: None
+    )
+    manifest = exporter.run()
+    run = tmp_path / "run"
+
+    lifetime_queries = [
+        q
+        for q in queries
+        if "video" in q.get("dimensions", "") and "creatorContentType" in q.get("dimensions", "")
+    ]
+    assert len(lifetime_queries) == 1
+    assert lifetime_queries[0]["filters"] == "video==v1,v2"
+    assert manifest["error_count"] == 1  # demographics still fails
+
+    video_metrics = pd.read_csv(run / "video_metrics.csv")
+    assert len(video_metrics) == 2
+    assert set(video_metrics["video_id"]) == {"v1", "v2"}
+    assert set(video_metrics["creatorContentType"]) == {"SHORTS"}
+
+    videos = pd.read_csv(run / "videos.csv")
+    assert videos["is_short"].tolist() == [True, True]
+
+
+def _fake_youtube_with_n(n: int, extra_playlist_ids: list[str] | None = None) -> MagicMock:
+    youtube = MagicMock()
+    channel = {
+        "id": "UC123",
+        "snippet": {"title": "alfie", "publishedAt": "2024-01-01T00:00:00Z"},
+        "contentDetails": {"relatedPlaylists": {"uploads": "UU123"}},
+        "statistics": {"viewCount": "100"},
+    }
+    youtube.channels.return_value.list.return_value = FakeRequest({"items": [channel]})
+    valid_ids = {f"v{i}" for i in range(n)}
+    item_ids = list(valid_ids)
+    if extra_playlist_ids:
+        item_ids += extra_playlist_ids
+    items = [
+        {"contentDetails": {"videoId": vid, "videoPublishedAt": "2026-08-01T10:00:00Z"}}
+        for vid in item_ids
+    ]
+    youtube.playlistItems.return_value.list.return_value = FakeRequest({"items": items})
+
+    def videos_list(**kw: Any) -> FakeRequest:
+        # videos.list silently drops invalid/deleted IDs, so only return valid ones
+        ids = [v for v in kw["id"].split(",") if v in valid_ids]
+        return FakeRequest(
+            {
+                "items": [
+                    {
+                        "id": v,
+                        "snippet": {"title": v, "publishedAt": "2026-08-01T10:00:00Z"},
+                        "contentDetails": {"duration": "PT30S"},
+                    }
+                    for v in ids
+                ]
+            }
+        )
+
+    youtube.videos.return_value.list.side_effect = videos_list
+    youtube.commentThreads.return_value.list.side_effect = lambda **kw: FakeRequest(
+        {"items": [{"id": "t1", "snippet": {"topLevelComment": _comment("t1", "x"), "totalReplyCount": 0}}]}
+    )
+    return youtube
+
+
+def test_video_lifetime_batches_large_channel(tmp_path: Path) -> None:
+    n = 250
+    service = MagicMock()
+    queries: list[dict[str, Any]] = []
+
+    def query(**params: Any) -> FakeRequest:
+        queries.append(params)
+        if "video" in params.get("dimensions", "") and "creatorContentType" in params.get("dimensions", ""):
+            return FakeRequest(_lifetime_response(params))
+        if params.get("dimensions") == "ageGroup,gender":
+            return FakeRequest(errors=[http_error(400)])
+        return FakeRequest(_analytics_response(params))
+
+    service.reports.return_value.query.side_effect = query
+    options = ExportOptions(out_base=tmp_path, until=date(2026, 9, 25))
+    exporter = Exporter(
+        _fake_youtube_with_n(n), service, MagicMock(), options, run_dir=tmp_path / "run", sleep=lambda _s: None
+    )
+    exporter.run()
+    run = tmp_path / "run"
+
+    lifetime_queries = [
+        q
+        for q in queries
+        if "video" in q.get("dimensions", "") and "creatorContentType" in q.get("dimensions", "")
+    ]
+    assert len(lifetime_queries) == 2
+    filters_0 = lifetime_queries[0]["filters"].replace("video==", "").split(",")
+    filters_1 = lifetime_queries[1]["filters"].replace("video==", "").split(",")
+    assert len(filters_0) == 200
+    assert len(filters_1) == 50
+    assert set(filters_0) & set(filters_1) == set()
+
+    video_metrics = pd.read_csv(run / "video_metrics.csv")
+    assert len(video_metrics) == n
+    assert set(video_metrics["video_id"]) == {f"v{i}" for i in range(n)}
+
+
+def test_video_lifetime_skips_deleted_videos(tmp_path: Path) -> None:
+    service = MagicMock()
+    queries: list[dict[str, Any]] = []
+
+    def query(**params: Any) -> FakeRequest:
+        queries.append(params)
+        if "video" in params.get("dimensions", "") and "creatorContentType" in params.get("dimensions", ""):
+            return FakeRequest(_lifetime_response(params))
+        if params.get("dimensions") == "ageGroup,gender":
+            return FakeRequest(errors=[http_error(400)])
+        return FakeRequest(_analytics_response(params))
+
+    service.reports.return_value.query.side_effect = query
+    options = ExportOptions(out_base=tmp_path, until=date(2026, 9, 25))
+    # deleted is in uploads playlist but not returned by videos.list
+    youtube = _fake_youtube_with_n(2, extra_playlist_ids=["deleted"])
+    exporter = Exporter(youtube, service, MagicMock(), options, run_dir=tmp_path / "run", sleep=lambda _s: None)
+    exporter.run()
+    run = tmp_path / "run"
+
+    lifetime_queries = [
+        q
+        for q in queries
+        if "video" in q.get("dimensions", "") and "creatorContentType" in q.get("dimensions", "")
+    ]
+    assert len(lifetime_queries) == 1
+    assert "deleted" not in lifetime_queries[0]["filters"]
+    ids_in_filter = lifetime_queries[0]["filters"].replace("video==", "").split(",")
+    assert set(ids_in_filter) == {"v0", "v1"}
+
+    videos = pd.read_csv(run / "videos.csv")
+    assert set(videos["video_id"]) == {"v0", "v1"}
+
+
+def test_video_lifetime_deduplicates_ids(tmp_path: Path) -> None:
+    service = MagicMock()
+    queries: list[dict[str, Any]] = []
+
+    def query(**params: Any) -> FakeRequest:
+        queries.append(params)
+        if "video" in params.get("dimensions", "") and "creatorContentType" in params.get("dimensions", ""):
+            return FakeRequest(_lifetime_response(params))
+        if params.get("dimensions") == "ageGroup,gender":
+            return FakeRequest(errors=[http_error(400)])
+        return FakeRequest(_analytics_response(params))
+
+    service.reports.return_value.query.side_effect = query
+    options = ExportOptions(out_base=tmp_path, until=date(2026, 9, 25))
+
+    youtube = MagicMock()
+    channel = {
+        "id": "UC123",
+        "snippet": {"title": "alfie", "publishedAt": "2024-01-01T00:00:00Z"},
+        "contentDetails": {"relatedPlaylists": {"uploads": "UU123"}},
+        "statistics": {"viewCount": "100"},
+    }
+    youtube.channels.return_value.list.return_value = FakeRequest({"items": [channel]})
+    # same ID twice in uploads playlist
+    items = [
+        {"contentDetails": {"videoId": "v1", "videoPublishedAt": "2026-08-01T10:00:00Z"}},
+        {"contentDetails": {"videoId": "v1", "videoPublishedAt": "2026-08-01T10:00:00Z"}},
+    ]
+    youtube.playlistItems.return_value.list.return_value = FakeRequest({"items": items})
+    youtube.videos.return_value.list.side_effect = lambda **kw: FakeRequest(
+        {
+            "items": [
+                {
+                    "id": v,
+                    "snippet": {"title": v, "publishedAt": "2026-08-01T10:00:00Z"},
+                    "contentDetails": {"duration": "PT30S"},
+                }
+                for v in kw["id"].split(",")
+            ]
+        }
+    )
+    youtube.commentThreads.return_value.list.side_effect = lambda **kw: FakeRequest(
+        {"items": [{"id": "t1", "snippet": {"topLevelComment": _comment("t1", "x"), "totalReplyCount": 0}}]}
+    )
+
+    exporter = Exporter(youtube, service, MagicMock(), options, run_dir=tmp_path / "run", sleep=lambda _s: None)
+    exporter.run()
+    run = tmp_path / "run"
+
+    lifetime_queries = [
+        q
+        for q in queries
+        if "video" in q.get("dimensions", "") and "creatorContentType" in q.get("dimensions", "")
+    ]
+    assert len(lifetime_queries) == 1
+    ids_in_filter = lifetime_queries[0]["filters"].replace("video==", "").split(",")
+    assert ids_in_filter == ["v1"]
+
+    video_metrics = pd.read_csv(run / "video_metrics.csv")
+    assert len(video_metrics) == 1
+    assert video_metrics["video_id"].iloc[0] == "v1"
+
+
+def test_video_lifetime_missing_analytics_row(tmp_path: Path) -> None:
+    service = MagicMock()
+    queries: list[dict[str, Any]] = []
+
+    def query(**params: Any) -> FakeRequest:
+        queries.append(params)
+        dims = params.get("dimensions", "")
+        if "video" in dims and "creatorContentType" in dims:
+            filters = dict(f.split("==", 1) for f in params.get("filters", "").split(";") if f)
+            ids = [v for v in filters.get("video", "").split(",") if v]
+            # drop v2 from the lifetime response to simulate missing data
+            ids = [v for v in ids if v != "v2"]
+            params = {**params, "filters": "video==" + ",".join(ids) if ids else "video=="}
+            return FakeRequest(_lifetime_response(params))
+        if params.get("dimensions") == "ageGroup,gender":
+            return FakeRequest(errors=[http_error(400)])
+        return FakeRequest(_analytics_response(params))
+
+    service.reports.return_value.query.side_effect = query
+    options = ExportOptions(out_base=tmp_path, until=date(2026, 9, 25))
+    exporter = Exporter(
+        _fake_youtube(), service, MagicMock(), options, run_dir=tmp_path / "run", sleep=lambda _s: None
+    )
+    exporter.run()
+    run = tmp_path / "run"
+
+    video_metrics = pd.read_csv(run / "video_metrics.csv")
+    assert set(video_metrics["video_id"]) == {"v1"}
+    assert "v2" not in video_metrics["video_id"].values
+
+    videos = pd.read_csv(run / "videos.csv")
+    row = videos.set_index("video_id").loc["v2"]
+    assert pd.isna(row["content_type"])
+    assert pd.isna(row["is_short"])
+
+
+def test_combine_fills_missing_content_type() -> None:
+    df1 = pd.DataFrame({"video_id": ["a"], "creatorContentType": ["SHORTS"], "views": [10]})
+    df2 = pd.DataFrame({"video_id": ["b"], "creatorContentType": [None], "views": [5]})
+
+    # default: aggregate tables use "ALL"
+    combined = combine([df1, df2])
+    assert combined["creatorContentType"].tolist() == ["SHORTS", "ALL"]
+
+    # video_metrics uses "MISSING"
+    combined = combine([df1, df2], missing_content_type="MISSING")
+    assert combined["creatorContentType"].tolist() == ["SHORTS", "MISSING"]

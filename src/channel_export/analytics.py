@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from .common import ApiCaller
+from .common import ApiCaller, chunked
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +40,6 @@ ENGAGEMENT_METRICS: tuple[str, ...] = (
     "shares",
     "subscribersGained",
     "subscribersLost",
-    "videosAddedToPlaylists",
-    "videosRemovedFromPlaylists",
 )
 # Valid for: Top videos, Time-based, User activity by country (channel_reports).
 BASIC_METRICS: tuple[str, ...] = VIEW_METRICS + PREMIUM_METRICS + ENGAGEMENT_METRICS
@@ -50,8 +48,6 @@ SUBSCRIBED_STATUS_METRICS: tuple[str, ...] = VIEW_METRICS + (
     "likes",
     "dislikes",
     "shares",
-    "videosAddedToPlaylists",
-    "videosRemovedFromPlaylists",
 )
 # Traffic source, traffic source detail, device/OS and playback location reports.
 INSIGHT_METRICS: tuple[str, ...] = ("engagedViews", "views", "estimatedMinutesWatched")
@@ -88,7 +84,6 @@ TRAFFIC_DETAIL_TYPES: tuple[str, ...] = (
     "EXT_URL",
     "YT_OTHER_PAGE",
     "ADVERTISING",
-    "WATCH_WITH",
 )
 
 TOP_VIDEOS_MAX_RESULTS = 200  # "Top videos" reports: maxResults <= 200 and sort is required
@@ -251,17 +246,25 @@ def channel_report_specs(monetary: bool = False) -> list[ReportSpec]:
     return specs
 
 
-def video_lifetime_spec() -> ReportSpec:
-    """Per-video totals plus content type ("Top videos" report, paginated 200 rows at a time)."""
-    return ReportSpec(
-        name="video_lifetime",
-        metrics=BASIC_METRICS,
-        dimensions=("video", "creatorContentType"),
-        sort="-views",
-        max_results=TOP_VIDEOS_MAX_RESULTS,
-        paginate=True,
-        table="video_metrics",
-    )
+def video_lifetime_specs(video_ids: Sequence[str], max_ids: int = MAX_FILTER_IDS) -> list[ReportSpec]:
+    """Per-video lifetime totals plus content type, batched by ``max_ids`` per request.
+
+    The ``video`` dimension combined with ``creatorContentType`` is rejected by the channel-level
+    "Top videos" report, but it works when the request is filtered to specific video IDs. We use the
+    IDs already validated by ``videos.list`` and batch them to keep request URLs short.
+    """
+    specs: list[ReportSpec] = []
+    for index, batch in enumerate(chunked(list(video_ids), max_ids), 1):
+        specs.append(
+            ReportSpec(
+                name=f"video_lifetime_batch_{index}",
+                metrics=BASIC_METRICS,
+                dimensions=("video", "creatorContentType"),
+                filters="video==" + ",".join(batch),
+                table="video_metrics",
+            )
+        )
+    return specs
 
 
 def video_revenue_spec() -> ReportSpec:

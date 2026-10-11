@@ -166,14 +166,14 @@ def comments_to_df(records: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def combine(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
-    """Concatenate frames from several reports; rows missing creatorContentType are labelled ALL."""
+def combine(frames: Sequence[pd.DataFrame], *, missing_content_type: str = "ALL") -> pd.DataFrame:
+    """Concatenate frames from several reports; rows missing creatorContentType are filled in."""
     frames = [f for f in frames if f is not None and not f.empty]
     if not frames:
         return pd.DataFrame()
     df = pd.concat(frames, ignore_index=True, sort=False)
     if "creatorContentType" in df.columns:
-        df["creatorContentType"] = df["creatorContentType"].fillna("ALL")
+        df["creatorContentType"] = df["creatorContentType"].fillna(missing_content_type)
     return df
 
 
