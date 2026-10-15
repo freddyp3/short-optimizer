@@ -599,13 +599,16 @@ prompts/analyze_video/v1.md, v1.config.yaml, FINGERPRINTS.json, examples.json
 ## 4. Tracing and cost tracking (`src/obs/`)
 
 Goal: every model call and tool call, in evals and later in production, produces a trace with tokens, dollars and
-latency, stored locally in a format the orchestrator and API reuse without change. No third-party backend is required
-(Langfuse/OTel can be bolted on later via an exporter interface; keeping local first avoids a dependency before the
-product exists).
+latency, stored locally in a format the orchestrator and API reuse without change. Tracing is built on the real
+**OpenTelemetry SDK** (`opentelemetry-sdk`): our code instruments through OTel spans, and a custom `SpanExporter`
+writes to the local SQLite/JSONL sinks below, so no external backend is required by default. Pointing the OTLP
+exporter at Jaeger/Honeycomb/Langfuse is a config change, not a code change.
 
 ### 4.1 Model
 
-OpenTelemetry-shaped but minimal: a **trace** (one eval example, or later one publish-plan request) is a tree of **spans**.
+A **trace** (one eval example, or later one publish-plan request) is a tree of OTel **spans**. `src/obs/tracing.py`
+is a thin wrapper over a `TracerProvider` + `SimpleSpanProcessor`/`BatchSpanProcessor`, exposing the small API below
+so call sites never touch OTel directly:
 
 ```python
 # src/obs/tracing.py
@@ -616,8 +619,10 @@ with tracer.trace("eval_example", run_id=..., attrs={...}) as tr:             # 
             llm.set_usage(model=..., input_tokens=..., output_tokens=..., thinking_tokens=..., cached_tokens=..., video_tokens=...)
 ```
 
-`contextvars` carries the current span so nested async code does not pass handles around. A no-op tracer is the
-default so library code runs untraced in tests.
+`kind` and `set_usage` map to span attributes (e.g. `gen_ai.usage.input_tokens` where a GenAI semantic convention
+fits, custom `obs.*` attributes otherwise). OTel `context` carries the current span so nested async code does not
+pass handles around. A tracer built on `trace.NoOpTracerProvider` is the default in tests so library code runs
+untraced.
 
 ### 4.2 What gets logged (per span)
 
@@ -643,12 +648,15 @@ never zero. Anthropic models are added in phase 5 (Claude token prices incl. cac
 
 ### 4.4 Storage
 
-- **Local default:** SQLite at `data/obs/traces.sqlite` with tables `traces(trace_id, name, started_at, run_id, status, attrs_json, total_cost_usd, duration_ms)` and `spans(...)` (columns as 4.2; attrs as JSON), plus a mirrored append-only
+- **Local default:** a custom OTel `SpanExporter` (`SQLiteJsonlExporter`) writes spans to SQLite at
+  `data/obs/traces.sqlite` with tables `traces(trace_id, name, started_at, run_id, status, attrs_json, total_cost_usd, duration_ms)` and `spans(...)` (columns as 4.2; attrs as JSON), plus a mirrored append-only
   `data/obs/spans.jsonl` for easy tailing and git-free backup. Writes are batched and flushed at trace end (and on exit).
 - `python -m src.obs.cli report --run RUN_ID` / `--since 24h` / `top-cost`: aggregates by prompt version, model and span name;
   `show TRACE_ID` prints the span tree with timings and costs (a text flame graph). This is the "latency numbers" resume
   evidence source for phase 5.
-- An `Exporter` protocol (`export(spans)`) lets phase 8 add a Postgres/Langfuse/OTLP exporter without touching call sites.
+- **Optional remote export:** when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, an `OTLPSpanExporter` is added alongside the
+  local exporter (env-var config only; works with Jaeger, Honeycomb, Langfuse, Grafana, etc.). Phase 8 can add a
+  Postgres exporter as another `SpanExporter` without touching call sites.
 
 ### 4.5 Reuse by the orchestrator (phase 5) and API (phase 8)
 
@@ -666,11 +674,11 @@ never zero. Anthropic models are added in phase 5 (Claude token prices incl. cac
 
 ```
 src/obs/__init__.py
-src/obs/tracing.py     # Tracer, Span, contextvars, no-op tracer
+src/obs/tracing.py     # thin wrapper over opentelemetry-sdk (TracerProvider, spans, usage attrs, no-op default)
 src/obs/pricing.py     # price table loader, cost computation
 src/obs/prices.yaml    # versioned model prices
 src/obs/cost.py        # BudgetGuard, aggregate helpers
-src/obs/store.py       # SQLite + JSONL sink, Exporter protocol, blob sidecar
+src/obs/store.py       # SQLiteJsonlExporter (SpanExporter), blob sidecar, optional OTLP wiring
 src/obs/cli.py         # report / show / top-cost
 ```
 
@@ -699,7 +707,8 @@ data/evals/, data/videos/, data/cache/, data/obs/     # all gitignored (confirm 
 ```
 
 New dependencies (`requirements.txt`): `google-genai`, `pydantic>=2`, `pyarrow`, `scikit-learn`, `scipy`, `numpy`,
-`pyyaml`, `matplotlib`, `imagehash` + `pillow` (optional), `tenacity` (or hand-rolled backoff), `pytest-asyncio`.
+`pyyaml`, `matplotlib`, `imagehash` + `pillow` (optional), `tenacity` (or hand-rolled backoff), `pytest-asyncio`,
+`opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` (for the optional remote export in 4.4).
 System: `ffmpeg`/`ffprobe` on PATH (document in README; tests skip ffmpeg-dependent cases if missing).
 
 ---
@@ -768,7 +777,7 @@ second call is a cache hit.
 
 ## 7. Build order inside the phase (about 2 weeks after the phase 2 gate)
 
-1. **`src/obs/` minimal** (tracer, pricing, JSONL sink). Everything after depends on it.
+1. **`src/obs/` minimal** (OTel-based tracer, pricing, SQLite/JSONL exporter). Everything after depends on it.
 2. **`labels.py` + `dataset.py` + `splits.py`** with tests; run `build-dataset` + `describe-dataset`; **eyeball curves and
    ground-truth drop-offs on 10 videos** before anything else.
 3. **`schema.py`, `prompt.py`, `media.py`, `client.py`, `cache.py`, `tool.py`** with fake-client tests; one live smoke.
