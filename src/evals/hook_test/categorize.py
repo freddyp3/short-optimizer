@@ -24,12 +24,20 @@ log = logging.getLogger(__name__)
 DEFAULT_EXPORT = Path("data/channel")
 OUT_CSV = Path("data/evals/hook_test/categories.csv")
 
+# Creator-confirmed Brawl Stars Shorts whose titles are hashtag-only (Sep 2025),
+# so no keyword can catch them.
+BRAWL_STARS_VIDEO_IDS = frozenset({
+    "ra7rkIN7XqI", "nCUy_br_hVc", "SdbzY3th2fY", "4HGp6o8jb3U",
+    "1L3rQUmf44Y", "wGVQzjMbCTM", "-RsBklJcj5g",
+})
+
 # First match wins. Keywords are lowercase regex alternations matched against
 # the lowercased title; keep them specific enough to avoid cross-talk
 # (e.g. "run"/"game" alone would match half the corpus, so they only count
-# inside the game-pattern group after the supercell group).
+# inside the game-pattern group after the Brawl Stars / Clash groups).
 CATEGORY_PATTERNS: list[tuple[str, str]] = [
-    ("supercell", r"brawl|clash"),
+    ("brawl_stars", r"brawl"),
+    ("clash_royale", r"clash"),
     (
         "misc_mobile_games",
         r"dop|delete one|gameplay|walkthrough|level ?\d|puzzle|simulator|race|"
@@ -50,6 +58,11 @@ def categorize_title(title: str) -> str:
     return "non_gaming_other"
 
 
+def categorize_video(video_id: str, title: str) -> str:
+    """Category for one video: manual Brawl Stars overrides first, then title keywords."""
+    return "brawl_stars" if video_id in BRAWL_STARS_VIDEO_IDS else categorize_title(title)
+
+
 def latest_export(base: Path) -> Path:
     """Newest timestamped export directory under base."""
     dirs = sorted(p for p in base.iterdir() if p.is_dir() and (p / "videos.csv").exists())
@@ -66,7 +79,7 @@ def hold_resid(df: pd.DataFrame, fit_mask: pd.Series) -> pd.Series:
 
     The trend line is fit on ``fit_mask`` rows only (the reference class) and
     applied to every row, so e.g. a misc-games Short's residual means
-    "vs the supercell trend for its length", not vs its own category.
+    "vs the Brawl Stars trend for its length", not vs its own category.
     NaN where inputs are missing.
     """
     import numpy as np
@@ -101,7 +114,7 @@ def categorize_export(export_dir: Path) -> pd.DataFrame:
     videos = pd.read_csv(export_dir / "videos.csv")
     metrics = pd.read_csv(export_dir / "video_metrics.csv")
     shorts = videos[videos["content_type"] == "shorts"].copy()
-    shorts["category"] = shorts["title"].map(categorize_title)
+    shorts["category"] = [categorize_video(v, t) for v, t in zip(shorts["video_id"], shorts["title"])]
     sm = metrics[metrics["creatorContentType"] == "shorts"][
         ["video_id", "engagedViews", "averageViewPercentage"]
     ]
@@ -109,7 +122,7 @@ def categorize_export(export_dir: Path) -> pd.DataFrame:
     # Reference class ~ the plan's eligible pool minus the curve/post-change
     # checks (select.py re-fits on the true eligible set; this is for browsing).
     ref = (
-        (shorts["category"] == "supercell")
+        (shorts["category"] == "brawl_stars")
         & shorts["duration_seconds"].between(8, 60)
         & (pd.to_datetime(shorts["published_at"]) < "2025-03-01")
         & (shorts["engagedViews"] >= 1000)
