@@ -28,7 +28,7 @@ It is built on the creator's own channel data and validated with evals against r
 ## Working rules
 
 - Writing complete implementations is fine and expected. Explain key decisions briefly.
-- Pace: one phase (or sub-step) at a time, then a checkpoint summary and wait for the user before continuing. The user wants time to digest; don't chain phases.
+- Pace: build end-to-end; do not pause between phases for checkpoints.
 - Never commit `.env`, `secrets/`, OAuth client secrets, or tokens. `data/` is gitignored.
 - Python 3.11+, venv at `./venv`. Run tests with `./venv/bin/python -m pytest tests/`.
 - Views are heavy-tailed (median ~13k, max 10.6M): target retention, swipe rate and relative metrics.

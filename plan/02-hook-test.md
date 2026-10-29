@@ -15,7 +15,7 @@ Shorts hold viewers and where viewers leave? If not better than chance, `analyze
 | 2025-03-31 view change | Retention and `averageViewPercentage` are ratios, not counts, but still mix definitions for old videos that kept getting views after the change. Rule: eligible pool = published before 2025-03-01 AND <=20% of lifetime `engagedViews` after 2025-03-31 |
 | Splits | `DEV` 10/10 (prompt iteration), `GATE` 20/20 (frozen prompt, one confirmatory run), `HELDOUT` rest of the extremes (touched once, at the end of Step 3) |
 | Video files | Google Takeout (bulk, officially allowed) or creator's local source files; Studio per-video download as fallback; yt-dlp only as last resort (against YouTube ToS, see section 3) |
-| Model | `gemini-3.8-flash` primary; `gemini-3.1-pro-preview` as one comparison run. fps 5 and high media resolution on the gate; fps/resolution ablation on DEV only |
+| Model | `gemini-3.8-flash` primary; `gemini-3.1-pro-preview` or `gemini-4-argon` as one comparison run (Argon preferred if the account has access: ~same cost as Pro, newer). fps 5 and high media resolution on the gate; fps/resolution ablation on DEV only |
 | Output | Pointwise JSON: `p_strong` 0..1, `confidence`, `dropoff_timestamp` (seconds), short reasons |
 | Primary scoring | Rank-based group call (top 20 `p_strong` of 40 = "strong") must reach >=26/40; drop-off scored by percentile rank of retention loss at the predicted time with a permutation test |
 | Repeats | 3 runs per video at default sampling, scores averaged before scoring (no best-of-3) |
@@ -150,7 +150,18 @@ Token model: tokens ~= duration_s x fps x tokens_per_frame + 32 x duration_s (au
 | Flash, DEV iteration (20 videos x ~10 batches) | ~$0.039 | 200 | ~$7.8 |
 | Flash, DEV ablations (6 settings x 20 videos x 1 run, mixed fps) | ~$0.025 avg | 120 | ~$3 |
 | Pro, GATE comparison (40 x 1 run) | 34k x $2/M + 3.6k x $12/M = ~$0.11 | 40 | ~$4.4 |
-| Total | | | ~$20 |
+| Argon (intro $2/$10), GATE comparison (40 x 1 run) | 34k x $2/M + 3.6k x $10/M = ~$0.10 | 40 | ~$4.2 |
+| Argon (post-intro $4/$20), GATE comparison | ~$0.21 | 40 | ~$8.4 |
+| Total (with Pro or intro-Argon comparison) | | | ~$20 |
+
+`gemini-4-argon` (introductory $2/M in, $10/M out through 2026-11-30, then $4/$20) is multimodal with video understanding and a 1M context; requires a paid-tier Gemini API key (not on the free tier). If the intro price has lapsed, a full 3-run Argon GATE (~$25) would consume nearly the whole $30 cap; run Argon as a single comparison batch only.
+
+Argon-specific gotchas (verified against ai.google.dev, 2026-10-20):
+- Reasoning is controlled by `thinking_level` (`"low" | "medium" | "high"`, default `"medium"`). `thinking_budget` / `"MINIMAL"` return HTTP 400 — different parameter name than 3.x. Thinking tokens bill as output ($10/M intro); measure `usage_metadata` on DEV before any batch. Try `"low"` first — Google recommends it for classification/extraction tasks.
+- "Agentic video understanding" is GA and opt-in (default `static`). Keep it OFF for eval runs — the gate needs an identical, reproducible view of every video; adaptive frame inspection would make settings non-comparable across videos.
+- 1M context is unified: input + thinking + output share it. Per-call output is capped (64K per SDK hop, "long decode" continues automatically in new SDKs) — fine for our ~4k outputs, just don't be surprised by the cap number in docs.
+- Implicit prompt caching only (>=6,144 shared prefix tokens); our prompt is ~1.5k so no savings — don't build the cost model on cached-input pricing.
+- Batch API (50% off) is supported; viable for the GATE since results aren't needed interactively.
 
 Hard cap $30; the harness refuses to start a batch whose estimated cost (from the token counter, `client.models.count_tokens` on one sample video per setting) pushes the running total past the cap. Cost is tracked per call (input/output/thinking tokens x price table in `config.py`) and summed into the results JSON; this seeds the per-run cost tracking that Phase 8 needs. Using the Batch API (50% discount) is possible for the final 3-run gate but not needed at this size.
 

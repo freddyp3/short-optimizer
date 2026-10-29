@@ -232,4 +232,3 @@ token*.json
 
 # macOS / local tooling
 .DS_Store
-.buildmode
