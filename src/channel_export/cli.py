@@ -114,6 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         creds = get_credentials(
             monetary=args.monetary,
+            comments=not args.skip_comments,
             client_secret=args.client_secret,
             token_path=args.token,
             open_browser=not args.no_browser,

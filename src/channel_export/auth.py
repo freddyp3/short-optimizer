@@ -17,11 +17,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 log = logging.getLogger(__name__)
 
 YOUTUBE_READONLY = "https://www.googleapis.com/auth/youtube.readonly"
+YOUTUBE_FORCE_SSL = "https://www.googleapis.com/auth/youtube.force-ssl"
 ANALYTICS_READONLY = "https://www.googleapis.com/auth/yt-analytics.readonly"
 ANALYTICS_MONETARY_READONLY = "https://www.googleapis.com/auth/yt-analytics-monetary.readonly"
 
 # youtube.readonly: Data API reads, and required by Analytics reports.query since 2018.
 # yt-analytics.readonly: Analytics reports.query and the Reporting API.
+# youtube.force-ssl: commentThreads.list/comments.list reject youtube.readonly with 403
+# insufficientPermissions; only requested when the comment export runs.
 BASE_SCOPES: tuple[str, ...] = (YOUTUBE_READONLY, ANALYTICS_READONLY)
 
 DEFAULT_CLIENT_SECRET = Path("secrets/client_secret.json")
@@ -33,9 +36,11 @@ class AuthSetupError(RuntimeError):
     """Raised when the OAuth client secret is missing or unusable."""
 
 
-def scopes_for(monetary: bool) -> list[str]:
-    """Scopes to request; the monetary scope is only added when asked for."""
+def scopes_for(monetary: bool, comments: bool = False) -> list[str]:
+    """Scopes to request; comment/monetary scopes are only added when asked for."""
     scopes = list(BASE_SCOPES)
+    if comments:
+        scopes.append(YOUTUBE_FORCE_SSL)
     if monetary:
         scopes.append(ANALYTICS_MONETARY_READONLY)
     return scopes
@@ -132,12 +137,13 @@ def _run_flow(client_secret: Path | None, scopes: list[str], open_browser: bool)
 
 def get_credentials(
     monetary: bool = False,
+    comments: bool = False,
     client_secret: Path | None = None,
     token_path: Path = DEFAULT_TOKEN,
     open_browser: bool = True,
 ) -> Credentials:
     """Return valid user credentials, refreshing the cached token or re-running the browser flow."""
-    scopes = scopes_for(monetary)
+    scopes = scopes_for(monetary, comments)
     creds: Credentials | None = None
 
     if token_path.exists():
