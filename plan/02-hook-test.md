@@ -70,7 +70,10 @@ Length confound. Shorter videos mechanically retain better, so raw `averageViewP
    `hold_resid` = residual. Strong/weak are defined on `hold_resid`, not the raw value.
 2. **Stratify and verify.** Cut the pool into 3 duration tertiles; take strong/weak candidates within each tertile in equal numbers (rounded). After selection, run a Mann-Whitney U test (implement with numpy rank sums, normal approximation is fine at n=20) of duration strong vs weak: require p > 0.2 and |median difference| <= 2 s. If it fails, re-draw with the next seed (`seed+1`, up to 20 tries) and record the attempt number.
 
-Sanity filter (label quality): keep a strong candidate only if `mean(relativeRetentionPerformance) > 0.5` and a weak candidate only if `< 0.5`. This removes videos whose label comes from a length/era quirk that YouTube's own length-matched metric disagrees with.
+~~Sanity filter (label quality): keep a strong candidate only if `mean(relativeRetentionPerformance) > 0.5` and a weak candidate only if `< 0.5`.~~
+**Dropped (2026-10-29, before any Gemini call).** On the real pool the median `mean_rrp` is 0.65 (the channel beats YouTube's length-matched average on most videos) and `mean_rrp` correlates -0.67 with duration. The filter removed 31/59 weak vs 3/59 strong candidates, left 28 pairs (< 36 minimum), and widened the strong/weak median duration gap to 5-7.5 s, i.e. it reintroduced the length confound. Labels are plain top/bottom quartiles of `hold_resid`; `mean_rrp` stays a secondary label.
+
+**Category (2026-10-29):** the reference class is Brawl Stars only (title contains "brawl", plus 7 creator-confirmed hashtag-only Sep 2025 Shorts listed in `categorize.py`). Clash Royale (3 videos), the Nov-Dec 2023 hyper-casual game uploads and non-gaming uploads are excluded.
 
 Secondary labels, computed and stored but **not** used for selection (analysed after the gate, to see whether predictions track them):
 - `hook3s = audienceWatchRatio at elapsedVideoTimeRatio = min(1, 3/duration)`: the "hook" survival; closest available analogue of swipe rate.
