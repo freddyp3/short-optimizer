@@ -11,7 +11,7 @@ def synthetic_tables(n: int = 240, seed: int = 0) -> ExportTables:
     """n Brawl Stars Shorts with a planted length confound: shorter videos have higher averageViewPercentage."""
     rng = np.random.default_rng(seed)
     ids = [f"vid{i:03d}" for i in range(n)]
-    dur = rng.integers(8, 61, n).astype(float)
+    dur = np.clip(np.round(rng.lognormal(np.log(22), 0.45, n)), 8, 60)  # channel-like: median ~22 s
     pub = pd.Timestamp("2023-08-01", tz="UTC") + pd.to_timedelta(rng.uniform(0, 570, n), unit="D")
     quality = rng.normal(0, 1, n)
     avp = 160 - 30 * np.log(dur) + 8 * quality
@@ -54,6 +54,16 @@ def test_splits_are_disjoint_balanced_and_sized():
     assert result["splits"]["dev"]["strong"] == result["splits"]["dev"]["weak"] in (6, 10)
     assert result["splits"]["heldout"]["strong"] == result["splits"]["heldout"]["weak"] >= 10
     assert v["blind_id"].is_unique and v["blind_id"].str.fullmatch(r"v[0-9a-f]{8}").all()
+
+
+def test_rerandomization_picks_lowest_passing_score():
+    result = select(build_frame(synthetic_tables()), seed=340)
+    passing = [t for t in result["attempts"] if t["passed"]]
+    assert len(result["attempts"]) == 50 and passing
+    best = min(passing, key=lambda t: (t["score"], t["seed"]))
+    assert result["seed_used"] == best["seed"]
+    assert result["rerandomization"]["best_score"] == pytest.approx(best["score"])
+    assert all(result["balance"][s]["passed"] for s in ("dev", "gate", "heldout"))
 
 
 def test_same_seed_same_output():

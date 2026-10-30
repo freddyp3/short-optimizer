@@ -32,4 +32,8 @@ DEV_PAIRS_SHRUNK, HELDOUT_MIN_PAIRS_SHRUNK = 6, 10
 # Balance checks, strong vs weak
 BALANCE_MIN_P = 0.2
 BALANCE_MAX_MEDIAN_DURATION_DIFF_S = 2.0
-MAX_SEED_TRIES = 20
+# Rerandomization: try seeds SEED..SEED+N-1, keep draws where every split passes the rules above,
+# pick the lowest score = max |standardized mean difference| (strong vs weak, pool SD) over
+# {dev, gate, heldout} x {duration, publish date}. Ties -> lowest seed.
+RERANDOMIZATION_SEEDS = 50
+BALANCED_SPLITS = ("dev", "gate", "heldout")

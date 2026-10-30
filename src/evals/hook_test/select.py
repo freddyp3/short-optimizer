@@ -1,8 +1,8 @@
 """Pick the strong/weak Shorts for the hook test and split them into DEV / GATE / HELDOUT (plan section 2).
 
 Pipeline: per-video features -> eligible pool (funnel) -> hold_resid label -> strong/weak
-candidates (top/bottom quartile) -> cell-matched strong/weak pairs -> splits -> balance check
-(re-draw with seed+1 on failure). Deterministic, no network. Writes selection.json + selection.csv.
+candidates (top/bottom quartile) -> cell-matched strong/weak pairs -> splits -> rerandomization
+(fixed seed range, most balanced passing draw). Deterministic, no network. Writes selection.json + selection.csv.
 
 Deviation from the plan: no relativeRetentionPerformance sanity filter. On this channel the pool
 median RRP is 0.65 and RRP correlates -0.67 with duration, so the filter removed half the weak
@@ -153,19 +153,35 @@ def split_sizes(n_pairs: int) -> dict[str, int]:
     return {"gate": C.GATE_PAIRS, "dev": dev, "heldout": heldout}
 
 
-def balance(rows: pd.DataFrame) -> dict:
-    """Strong vs weak on duration and publish date (Mann-Whitney) plus median duration gap."""
+def _date_num(df: pd.DataFrame) -> pd.Series:
+    return (_ts(df["published_at"]) - pd.Timestamp(0, tz="UTC")).dt.total_seconds()
+
+
+def pool_sds(pool: pd.DataFrame) -> dict[str, float]:
+    """Pool-wide standard deviations used to standardize mean differences."""
+    return {"duration": float(pool["duration_seconds"].std()), "date": float(_date_num(pool).std())}
+
+
+def balance(rows: pd.DataFrame, sds: dict[str, float]) -> dict:
+    """Strong vs weak on duration and publish date: Mann-Whitney p, median duration gap, |SMD|."""
     s, w = rows[rows["label"] == "strong"], rows[rows["label"] == "weak"]
-    as_num = lambda df: _ts(df["published_at"]).astype("int64") / 1e9
     _, p_dur = mann_whitney_u(s["duration_seconds"], w["duration_seconds"])
-    _, p_date = mann_whitney_u(as_num(s), as_num(w))
+    _, p_date = mann_whitney_u(_date_num(s), _date_num(w))
     diff = abs(float(s["duration_seconds"].median() - w["duration_seconds"].median()))
+    smd_dur = abs(float(s["duration_seconds"].mean() - w["duration_seconds"].mean())) / sds["duration"]
+    smd_date = abs(float(_date_num(s).mean() - _date_num(w).mean())) / sds["date"]
     return {
         "n_strong": len(s), "n_weak": len(w),
         "duration_p": p_dur, "date_p": p_date, "median_duration_diff_s": diff,
+        "smd_duration": smd_dur, "smd_date": smd_date,
         "passed": p_dur > C.BALANCE_MIN_P and p_date > C.BALANCE_MIN_P
         and diff <= C.BALANCE_MAX_MEDIAN_DURATION_DIFF_S,
     }
+
+
+def balance_score(checks: dict[str, dict]) -> float:
+    """Worst |standardized mean difference| over the balanced splits and both confounders (lower = better)."""
+    return max(max(checks[s]["smd_duration"], checks[s]["smd_date"]) for s in C.BALANCED_SPLITS)
 
 
 def blind_ids(video_ids: list[str], seed: int) -> dict[str, str]:
@@ -199,7 +215,7 @@ def draw(cands: pd.DataFrame, seed: int) -> pd.DataFrame:
 
 
 def select(frame: pd.DataFrame, seed: int = C.SEED, available: set[str] | None = None) -> dict:
-    """Full selection; retries seed+1.. until GATE and HELDOUT are balanced."""
+    """Full selection; rerandomization over a fixed seed range, keeping the most balanced passing draw."""
     pool, funnel = eligible_pool(frame, available, C.MAX_POST_CHANGE_SHARE)
     relaxed = len(pool) < C.MIN_POOL_BEFORE_RELAX
     if relaxed:
@@ -208,22 +224,32 @@ def select(frame: pd.DataFrame, seed: int = C.SEED, available: set[str] | None =
         raise SelectionError(f"eligible pool has only {len(pool)} videos")
     cands, label_info = label_candidates(pool)
 
-    tries = []
-    for attempt in range(C.MAX_SEED_TRIES):
-        sel = draw(cands, seed + attempt)
-        checks = {split: balance(sel[sel["split"] == split]) for split in ("dev", "gate", "heldout")}
-        checks["all"] = balance(sel)
-        tries.append({"seed": seed + attempt, "gate_passed": checks["gate"]["passed"], "heldout_passed": checks["heldout"]["passed"]})
-        if checks["gate"]["passed"] and checks["heldout"]["passed"]:
-            break
-    else:
-        raise SelectionError(f"no balanced draw in {C.MAX_SEED_TRIES} seeds: {tries}")
+    sds = pool_sds(pool)
+    tries, best = [], None
+    for s in range(seed, seed + C.RERANDOMIZATION_SEEDS):
+        sel = draw(cands, s)
+        checks = {split: balance(sel[sel["split"] == split], sds) for split in C.BALANCED_SPLITS}
+        checks["all"] = balance(sel, sds)
+        passed = all(checks[split]["passed"] for split in C.BALANCED_SPLITS)
+        score = balance_score(checks)
+        tries.append({"seed": s, "passed": passed, "score": score})
+        if passed and (best is None or score < best[0]):
+            best = (score, s, sel, checks)
+    if best is None:
+        raise SelectionError(f"no draw in seeds {seed}..{seed + C.RERANDOMIZATION_SEEDS - 1} passed all balance rules")
+    score, seed_used, sel, checks = best
 
     sel = sel.sort_values(["split", "label", "video_id"]).reset_index(drop=True)
     return {
         "seed": seed,
-        "seed_used": seed + attempt,
-        "attempt": attempt + 1,
+        "seed_used": seed_used,
+        "rerandomization": {
+            "seeds_tried": C.RERANDOMIZATION_SEEDS,
+            "seeds_passed": sum(t["passed"] for t in tries),
+            "score_definition": "max |SMD| strong vs weak (pool SD) over dev/gate/heldout x duration/date",
+            "best_score": score,
+        },
+        "pool_sds": sds,
         "attempts": tries,
         "pool_size": len(pool),
         "post_change_share_relaxed": relaxed,
@@ -270,10 +296,13 @@ def main(argv: list[str] | None = None) -> int:
     li = result["labels"]
     log.info("quartiles: strong if hold_resid>=%.2f, weak if <=%.2f; candidates %s",
              li["hold_resid_cutoffs"]["strong_ge"], li["hold_resid_cutoffs"]["weak_le"], li["candidates"])
-    log.info("pairs: %s; seed used %d (attempt %d)", result["pairs"], result["seed_used"], result["attempt"])
+    rr = result["rerandomization"]
+    log.info("pairs: %s; %d/%d seeds passed; chose seed %d with score %.3f", result["pairs"],
+             rr["seeds_passed"], rr["seeds_tried"], result["seed_used"], rr["best_score"])
     for split, b in result["balance"].items():
-        log.info("  %-8s %2d/%-2d  duration p=%.3f  date p=%.3f  |median dur diff|=%.1fs  %s", split, b["n_strong"],
-                 b["n_weak"], b["duration_p"], b["date_p"], b["median_duration_diff_s"], "ok" if b["passed"] else "FAIL")
+        log.info("  %-8s %2d/%-2d  duration p=%.3f  date p=%.3f  |median dur diff|=%.1fs  SMD dur=%.3f date=%.3f  %s",
+                 split, b["n_strong"], b["n_weak"], b["duration_p"], b["date_p"], b["median_duration_diff_s"],
+                 b["smd_duration"], b["smd_date"], "ok" if b["passed"] else "FAIL")
     log.info("wrote %s/selection.json and selection.csv", args.out_dir)
     return 0
 
