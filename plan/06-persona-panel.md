@@ -5,6 +5,43 @@ harness, metrics, `analyze_video`). **Ships only if** the experiment in section 
 baseline. If it loses, it is cut and documented as a negative result (section 9). Both outcomes are a
 portfolio win; the experiment is the deliverable, the tool is conditional.
 
+## 0. Revision 2026-11-03: retrieval first, then grounded audience agents (supersedes conflicting parts below)
+
+The product's second half is **"how will my viewers react, and why"**. Decided design:
+
+1. **`similar_videos` (retrieval, always ships).** For a draft, find the k=3-5 most similar past Shorts by the phase-3
+   checklist features (standardised features, cosine or weighted distance; weights may come from the retention
+   model). Return for each: title, `hold_resid`, engagement rates (likes/comments/shares per `engagedViews`), top
+   ~10 top-level comments by likes, and their comment-theme tags.
+2. **`audience_panel` (LLM agents, gated).** Personas (section 5) receive the draft's `analyze_video` output **plus
+   the retrieved evidence** and predict the reaction: comment themes to expect, engagement direction vs the
+   channel's usual, and the likely top comments, each citing the past video/comments it rests on. Persona grounding
+   now includes real retrieved comments, not only theme summaries.
+3. **Comment-theme tags (offline, once per export).** Top ~10 top-level comments by likes per video; a cheap text LLM
+   tags each (part-2 request, argument/disagreement, joke/meme, question, praise, criticism, tagging a friend,
+   other). Per-video theme shares are labels. Usernames/channel IDs are stripped before any LLM call. Data on hand
+   (2026-10-20 export): 35,835 comments on 270 videos, median 8 top-level per video, so thin videos are flagged
+   low-confidence rather than dropped silently.
+
+**Leakage rules.** When evaluating on video v, retrieval excludes v itself (leave-one-out) and the agents never see
+v's comments or stats. Comments and engagement are labels/evidence about *past* videos only.
+
+**Reaction eval (new primary for this phase).** On held-out videos, predict without seeing their comments, then
+score against the real ones:
+- theme prediction: per-theme AUC / macro-F1 of predicted vs real theme presence; Spearman of predicted vs real
+  engagement rates (relative to channel);
+- arms: **R0** retrieval-only (predict = the neighbours' average themes/rates), **R1** single LLM call with the same
+  evidence, **P** grounded persona panel, **P-noretrieval** panel without retrieved comments (tests grounding);
+- **decision rule:** retrieval ships regardless (it is evidence, not a prediction). Agents ship only if P beats R0
+  **and** R1 on the theme metric with the paired-bootstrap rule of 4.7 adapted to the theme metric. Otherwise the
+  product shows retrieved evidence plus R0's summary, and the negative result is documented.
+
+The original strong/weak arms below (B0-B4, P-generic) remain as a secondary analysis: retention is now predicted
+by the phase-3 model, so the panel's retention score is only reported for comparison.
+
+Security: comment text is untrusted (could contain injection attempts). It is passed as quoted data in a clearly
+delimited block, truncated, never as instructions; phase 8 adds injection-in-comment fixtures.
+
 ## 1. What the tool would do
 
 `audience_panel(video, analysis?) -> PanelReport`: a panel of N simulated viewers, each a persona grounded in

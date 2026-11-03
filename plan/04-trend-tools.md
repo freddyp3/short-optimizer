@@ -324,6 +324,14 @@ a gate for this tool.
 
 ## 3. `trending_audio`
 
+**Requirement added 2026-11-03 (creator):** the tool's main job is to surface the **most popular sounds of the last
+2 weeks** so the creator can pick one; the retention model deliberately does not model audio (03a, decision 7.4).
+Within the constraints below (no API, no scraping, no Short→sound mapping) this means: keep a rolling history of the
+manual chart drops (3.2 option A, weekly paste → `chart_week` column already supports it), and report for the 14-day
+window (a) the top N by latest rank, (b) **movers**: new entries and the biggest rank gains vs the previous week,
+(c) staleness of the newest drop. Build when phase 4 starts; the 14-day window and the movers view are the only
+additions to the design below.
+
 ### 3.1 What exists officially (and what does not)
 
 - **YouTube Charts**, "Top Songs on Shorts": help text says "Top Songs on Shorts recognizes song performance across

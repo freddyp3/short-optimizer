@@ -10,6 +10,50 @@ Models and API shapes below were checked against ai.google.dev on 2026-10-01; re
 
 ---
 
+## 0b. Revision 2026-11-03: feature extraction + retention model (supersedes conflicting parts below)
+
+Why: DEV v1 of the hook test showed Gemini's holistic `p_strong` has ~0 correlation with `hold_resid` (−0.04) and
+−0.53 with duration: it judges by generic "good Short" instincts, not by what this channel's audience rewards. Its
+*descriptions* were accurate. So Gemini describes, and a model trained on the channel's own data judges.
+
+**Target.** Primary label is `hold_resid` (phase 2 definition: lifetime `averageViewPercentage` residualised on
+log(duration) and publication era). It replaces `y_perf` / `y_ret` below as the headline. Secondary (reaction)
+labels, never inputs: `like_rate`, `comment_rate`, `share_rate` (per `engagedViews`), and comment-theme shares
+(phase 6, section 0).
+
+**Pipeline.**
+1. **Extract** (`analyze_video`, Gemini, paid key `GEMINI_API_KEY_PAID`): blinded video in, fixed checklist out. Every
+   field is an enum, bool or number (no free-text judgement fields feed the model). Draft groups: format, hook (0-3 s),
+   structure (payoff time and fraction, dead time, ending/loop), audio. The checklist, its evidence and the freezing
+   procedure are in [03a-feature-checklist.md](03a-feature-checklist.md) (draft v0, 2026-11-03; frozen before
+   training). Keep the scratchpad (`timeline`, `notes`) and thought summary for debugging.
+2. **Measure** (code, free): duration, scene cuts/s (ffmpeg scene detection), loudness/silence, first-frame text
+   presence if cheap. Prefer code wherever a feature is measurable.
+3. **Check the extractor** before trusting it:
+   - consistency: 2 runs on ~30 videos, per-feature agreement (Cohen's kappa for categories, ICC/correlation for
+     numbers); drop features below a threshold set before looking;
+   - accuracy: creator hand-labels a few features on ~20 videos; report agreement with Gemini.
+4. **Train** on the eligible Brawl Stars pool **minus** hook-test DEV/GATE/HELDOUT (~126 videos): regularised linear
+   model (ridge on `hold_resid`; logistic for strong/weak), hyperparameters and feature subset by repeated k-fold CV
+   on the training set only. A tree model may be reported as a comparison, not the default (n is small).
+5. **Freeze, then test** on the hook-test GATE 40 (same ≥26/40 rule, same strong/weak labels), and finally HELDOUT.
+   GATE and HELDOUT features are extracted but never looked at per-video before the model is frozen.
+6. **Explain**: per-video contributions (coefficient × standardised feature) become the "why" lines in the product.
+
+**Comparison table (the headline result).** On GATE, then HELDOUT: date-only and duration-only baselines; Gemini
+holistic (hook test v1/v2); features → model; features + Gemini holistic score. Report accuracy, AUC, Spearman with
+`hold_resid`, bootstrap CIs.
+
+**Cost.** ~236 eligible videos (the 110 eval videos are part of them) + ~30 consistency repeats ≈ 270 Gemini calls at ~$0.03 ≈ **$8-10** on the paid key. Requires topping up the paid project's prepaid credit; ask
+before spending. Code features and training cost $0.
+
+**Sections below that this replaces or adjusts:** labels (1.3: `hold_resid` is primary), splits (1.6: reuse the
+hook-test DEV/GATE/HELDOUT plus the training remainder instead of a new 70/30 time split), output schema (3.5: becomes
+the checklist), derived scores (3.6: come from the trained model, not the prompt). Dataset, harness, leakage controls,
+caching, tracing and cost tracking still apply as written.
+
+---
+
 ## 0. Dependencies and assumptions
 
 | Need | From | Notes |

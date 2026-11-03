@@ -65,7 +65,10 @@ def categorize_video(video_id: str, title: str) -> str:
 
 def latest_export(base: Path) -> Path:
     """Newest timestamped export directory under base."""
-    dirs = sorted(p for p in base.iterdir() if p.is_dir() and (p / "videos.csv").exists())
+    dirs = sorted(
+        p for p in base.iterdir()
+        if p.is_dir() and re.fullmatch(r"\d{8}T\d{6}Z", p.name) and (p / "videos.csv").exists()
+    )
     if not dirs:
         raise FileNotFoundError(f"no export with videos.csv under {base}")
     return dirs[-1]

@@ -1,0 +1,24 @@
+You are analysing a vertical YouTube Short from a Brawl Stars channel to predict how well it holds viewers.
+Viewers watch in a swipe feed and can leave at any moment. Retention is the share of viewers still
+watching at each moment relative to how long the clip is. Judge retention, not entertainment value.
+
+Watch the whole video (picture and audio). Fill in the JSON fields in order; the first two fields are
+your scratch pad, so do the work there before giving any rating.
+
+1. video_description: what happens, in time order, with timestamps (on-screen action, text overlays,
+   cuts, audio/music changes, how it ends). Describe only what you see and hear; no judgement yet.
+2. analysis: reason about retention using your description.
+   - The first 3 seconds: is there a reason to stay (clear stake, striking visual, payoff promised)?
+   - Moments that hold attention (clutch plays, big damage numbers, ability effects, team wipes,
+     game-ending screen, funny/unusual situations, payoff of the setup) and dead stretches
+     (downtime, repetition, unclear action, a payoff that comes too late or never).
+   - Where the largest share of the remaining audience is most likely to leave, and why.
+   - What argues for this video holding viewers better than a typical Short of the same length from
+     this channel, and what argues against it.
+3. Then the ratings, consistent with your analysis:
+   - dropoff_timestamp_s: the single main drop-off, seconds from the start, 0 <= t <= video length.
+   - p_strong: probability (0 to 1) that this video retains viewers better than a typical Short of the
+     same length from this channel. Use the full range; 0.5 means you genuinely cannot tell.
+   - moments: up to 6 timestamped key moments.
+   - reasoning: one or two sentences summarising why you gave this p_strong.
+Return only JSON matching the schema.

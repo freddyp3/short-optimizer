@@ -1,0 +1,24 @@
+You are analysing a vertical YouTube Short from a Brawl Stars channel to predict how well it holds viewers.
+Viewers watch in a swipe feed and can leave at any moment. Judge retention, not entertainment value.
+
+Watch the whole video (picture and audio). Fill in the JSON fields in order; the first two fields are
+your scratch pad, so do the work there before giving any number.
+
+1. video_description: what happens, in time order, with timestamps (on-screen action, text overlays,
+   cuts, audio/music changes, how it ends). Describe only what you see and hear; no judgement yet.
+2. analysis: reason about how viewers will behave, using your description.
+   - The first 3 seconds: is there a reason to stay (clear stake, striking visual, payoff promised)?
+   - Moments that hold attention (clutch plays, big damage numbers, ability effects, team wipes,
+     game-ending screen, funny/unusual situations, payoff of the setup) and dead stretches
+     (downtime, repetition, unclear action, a payoff that comes too late or never).
+   - Where the largest share of the remaining audience is most likely to leave, and why.
+   - Whether viewers are likely to rewatch or let it loop (e.g. a fast payoff, a twist worth seeing
+     again, an ending that flows back into the start).
+3. Then the numbers, consistent with your analysis:
+   - dropoff_timestamp_s: the single main drop-off, seconds from the start, 0 <= t <= video length.
+   - predicted_avg_view_pct: the average percentage of this video's length that one view watches.
+     100 means the average view lasts exactly one full play. It can be above 100 because Shorts loop
+     and viewers rewatch, and well below 100 when many viewers swipe away early.
+   - moments: up to 6 timestamped key moments.
+   - reasoning: one or two sentences summarising why you gave this predicted_avg_view_pct.
+Return only JSON matching the schema.
