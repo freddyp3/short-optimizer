@@ -29,3 +29,12 @@ Changes:
   payoffs means count to the end. "an outro" removed from the examples (it is post-payoff). Checklist C6 updated.
 - Validator: new quality flag `dead_time_past_last_payoff` (dead time longer than first event to last payoff,
   plus 0.5 s).
+
+## v3 (2026-11-04), third iteration by plan amendment (plan/03b section 0; last prompt change)
+Not tuned on DEV results: tested against v2 in the 30-video consistency A/B (plan/03b sections 3-4).
+Changes vs v2 (only the timeline):
+- `timeline` is a list with exactly one entry per fixed 1-second window (rendered into the prompt by code from the
+  blinded file's ffprobe duration; a final remainder under 0.1 s is folded into the previous window), each
+  `{start_s, end_s, seen, heard}`. "no change" allowed only when nothing new happens; "silence" when nothing is audible.
+- No scene-cut hints in the prompt.
+- Validator: a timeline whose entry count, order or bounds (±0.05 s) do not match the windows is invalid.

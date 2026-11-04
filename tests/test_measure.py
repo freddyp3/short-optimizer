@@ -108,3 +108,49 @@ def test_measure_synthetic_video(tmp_path):
     assert out["loudness_lufs"] is not None
     assert out["silence_frac"] == pytest.approx(0.0, abs=0.05)
     assert 0 <= out["first_last_dhash_dist"] <= 64
+
+
+def _frames_values(values):
+    """One uint8 frame per value (uniform luma), stacked."""
+    return np.stack([np.full((P.frame_h, P.frame_w), v, dtype=np.uint8) for v in values])
+
+
+class TestOpeningStats:
+    # window = frames with i / open_fps < 0.5 -> indices 0..4 at 10 fps
+
+    def test_black_first_frame(self):
+        out = M.opening_stats(_frames_values([0] + [200] * 9), P)
+        assert out["open_first_frame_black"] is True
+
+    def test_bright_first_frame(self):
+        out = M.opening_stats(_frames_values([200, 0] + [0] * 8), P)
+        assert out["open_first_frame_black"] is False
+
+    def test_open_luma(self):
+        out = M.opening_stats(_frames_values([0, 0, 0, 0, 255] + [255] * 5), P)
+        assert out["open_luma"] == pytest.approx(0.2, abs=1e-6)
+
+    def test_still_opening_motion(self):
+        out = M.opening_stats(_frames_values([120] * 10), P)
+        assert out["open_motion"] == 0.0
+
+    def test_moving_opening_motion(self):
+        # window frames [0..4]: diffs 0->200->0->200->0 all = 200/255
+        out = M.opening_stats(_frames_values([0, 200, 0, 200, 0] + [0] * 5), P)
+        assert out["open_motion"] == pytest.approx(200 / 255, abs=1e-6)
+
+    def test_motion_median_ignores_late_frames(self):
+        # a big change at frame 8 (outside the window) must not affect open_motion
+        out = M.opening_stats(_frames_values([0, 0, 0, 0, 0, 0, 0, 0, 255, 255]), P)
+        assert out["open_motion"] == 0.0
+
+    def test_one_frame(self):
+        out = M.opening_stats(_frames_values([0]), P)
+        assert out["open_first_frame_black"] is True
+        assert out["open_motion"] is None
+        assert out["open_luma"] == 0.0
+
+    def test_empty_frames(self):
+        out = M.opening_stats(np.zeros((0, P.frame_h, P.frame_w), dtype=np.uint8), P)
+        assert out == {"open_first_frame_black": None, "open_motion": None,
+                       "open_luma": None}

@@ -73,3 +73,40 @@ class TestCLI:
         assert (vids["label"] == "strong").sum() == 5
         assert (vids["label"] == "weak").sum() == 5
         assert (vids["split"] == "dev").all()
+
+
+class TestPinning:
+    def test_thinking_level_medium_on_extractor(self, tmp_path, blind_file):
+        from google.genai import types
+        fake = FakeClient([fake_resp(GOOD_JSON)])
+        t = GeminiFeatureExtractor(client=fake, uploads_path=tmp_path / "u.json",
+                                   sleep=lambda s: 0)
+        t.analyze("vAAA111", blind_file, "p", 21.0)
+        cfg = fake.models.calls[0]["config"].thinking_config
+        assert cfg.thinking_level == types.ThinkingLevel.MEDIUM
+        assert cfg.include_thoughts is True
+
+    def test_hook_tester_keeps_unpinned_thinking(self, tmp_path, blind_file):
+        from src.evals.hook_test.gemini_client import GeminiHookTester
+        t = GeminiHookTester(client=FakeClient([fake_resp()]),
+                             uploads_path=tmp_path / "u.json", sleep=lambda s: 0)
+        t.analyze("vAAA111", blind_file, "p", 21.0)
+        cfg = t.client.models.calls[0]["config"].thinking_config
+        assert cfg.thinking_level is None
+        assert cfg.include_thoughts is True
+
+    def test_model_version_recorded(self, tmp_path, blind_file):
+        r = fake_resp(GOOD_JSON)
+        r.model_version = "gemini-3.8-flash-001"
+        t = GeminiFeatureExtractor(client=FakeClient([r]),
+                                   uploads_path=tmp_path / "u.json", sleep=lambda s: 0)
+        rec = t.analyze("vAAA111", blind_file, "p", 21.0)
+        assert rec["model_version"] == "gemini-3.8-flash-001"
+
+
+class TestFileDuration:
+    def test_blind_duration_uses_ffprobe(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(extract, "probe",
+                            lambda p: {"duration_s": 11.3, "width": 1, "height": 1,
+                                       "has_audio": True})
+        assert extract.blind_duration(tmp_path / "x.mp4") == 11.3

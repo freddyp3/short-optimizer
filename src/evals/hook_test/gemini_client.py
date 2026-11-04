@@ -208,6 +208,11 @@ class GeminiHookTester:
         )
         return [video, prompt_text]
 
+    def _thinking_config(self):
+        """ThinkingConfig for the call. Overridable (extractor pins the level)."""
+        from google.genai import types
+        return types.ThinkingConfig(include_thoughts=True)
+
     def _generate(self, contents, response_schema):
         from google.genai import types
         return self.client.models.generate_content(
@@ -215,7 +220,7 @@ class GeminiHookTester:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema,
-                thinking_config=types.ThinkingConfig(include_thoughts=True),
+                thinking_config=self._thinking_config(),
             ))
 
     def analyze(self, blind_id: str, path: Path, prompt_text: str,
@@ -302,6 +307,7 @@ class GeminiHookTester:
         rec = {
             "blind_id": blind_id,
             "model": self.model,
+            "model_version": getattr(resp, "model_version", None),
             "schema_version": schema_version,
             "thought_summary": extract_thought_summary(resp),
             "tier": self.tier,

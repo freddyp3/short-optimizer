@@ -1,4 +1,4 @@
-"""Response schema for ``analyze_video`` feature extraction (plan/03a-feature-checklist.md, prompts v0-v2).
+"""Response schema for ``analyze_video`` feature extraction (plan/03a-feature-checklist.md, prompts v0-v3).
 
 ``VideoFeatures`` doubles as the Gemini ``response_schema`` and the validator for raw responses, like the hook
 test schema. Field order is generation order (the SDK emits ``propertyOrdering`` in declaration order): the
@@ -9,6 +9,7 @@ ordinal coding and derived features are computed elsewhere.
 
 from __future__ import annotations
 
+import math
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError
@@ -78,28 +79,72 @@ class VideoFeatures(BaseModel):
     notes: str = ""
 
 
+class TimelineEntry(BaseModel):
+    start_s: float = Field(ge=0.0)
+    end_s: float = Field(ge=0.0)
+    seen: str
+    heard: str
+
+
+class VideoFeaturesV3(VideoFeatures):
+    """v3 (plan/03b section 2): the timeline is one entry per fixed 1-second window; all other fields as v2."""
+
+    timeline: list[TimelineEntry] = Field(max_length=61)
+
+
+SCHEMAS = {"v0": VideoFeatures, "v1": VideoFeatures, "v2": VideoFeatures, "v3": VideoFeaturesV3}
+
 TIMESTAMP_FIELDS = ("t_first_event_s", "t_premise_clear_s", "t_audio_change_s")
 TOLERANCE_S = 0.5
+WINDOW_TOLERANCE_S = 0.05
 
 
-def validate_features(data, duration_s: float):
+def windows(duration_s: float) -> list[tuple[float, float]]:
+    """Fixed 1-second windows covering [0, duration]; the last one ends at the duration (rounded to 0.1 s).
+    A remainder under 0.1 s is folded into the previous window, so no window is empty."""
+    n = max(1, math.ceil(duration_s - 0.1))
+    return [(float(i), float(i + 1) if i < n - 1 else round(duration_s, 1)) for i in range(n)]
+
+
+def render_prompt(template: str, duration_s: float) -> str:
+    """Fill a prompt template's placeholders (v0-v2 only use ``duration_s``; v3 adds the window list)."""
+    w = windows(duration_s)
+    return template.format(duration_s=duration_s, n_windows=len(w),
+                           windows=", ".join(f"{a:.1f}-{b:.1f}" for a, b in w))
+
+
+def validate_features(data, duration_s: float, version: str = PROMPT_VERSION):
     """Validate a parsed JSON object against the schema and the video's duration.
 
     Returns (features, invalid_reason, quality_flags). ``features`` is None when invalid_reason is set.
     Out-of-range timestamps invalidate; internal inconsistencies are quality flags, read in the DEV pass
-    (plan/03a section 6.1) to decide which definitions Gemini misreads.
+    (plan/03a section 6.1) to decide which definitions Gemini misreads. For v3, a timeline that does not match
+    the given windows exactly (count, order, bounds within 0.05 s) is invalid.
     """
+    cls = SCHEMAS[version]
     if isinstance(data, dict):
-        extra = set(data) - set(VideoFeatures.model_fields)
+        extra = set(data) - set(cls.model_fields)
         if extra:
             return None, f"schema: extra field {sorted(extra)[0]}", []
         for p in data.get("payoffs") or []:
             if isinstance(p, dict) and (pextra := set(p) - set(Payoff.model_fields)):
                 return None, f"schema: extra field payoffs.{sorted(pextra)[0]}", []
+        if cls is VideoFeaturesV3:
+            for e in data.get("timeline") or []:
+                if isinstance(e, dict) and (textra := set(e) - set(TimelineEntry.model_fields)):
+                    return None, f"schema: extra field timeline.{sorted(textra)[0]}", []
     try:
-        f = VideoFeatures.model_validate(data)
+        f = cls.model_validate(data)
     except ValidationError as e:
         return None, f"schema: {e.errors()[0]['loc']} {e.errors()[0]['msg']}", []
+
+    if cls is VideoFeaturesV3:
+        w = windows(duration_s)
+        if len(f.timeline) != len(w):
+            return None, f"timeline: {len(f.timeline)} entries for {len(w)} windows", []
+        for i, (e, (a, b)) in enumerate(zip(f.timeline, w)):
+            if abs(e.start_s - a) > WINDOW_TOLERANCE_S or abs(e.end_s - b) > WINDOW_TOLERANCE_S:
+                return None, f"timeline[{i}]: {e.start_s}-{e.end_s} != window {a:.1f}-{b:.1f}", []
 
     limit = duration_s + TOLERANCE_S
     for name in TIMESTAMP_FIELDS:

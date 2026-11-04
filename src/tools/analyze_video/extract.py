@@ -24,6 +24,7 @@ from src.evals.hook_test import config as C
 from src.evals.hook_test.gemini_client import (
     DailyQuotaExceeded, GeminiHookTester, estimate_call_cost, sha256_file)
 from src.evals.hook_test.run import default_run_id
+from src.tools.analyze_video.measure import probe
 from src.tools.analyze_video.schema import (
     PROMPT_VERSION, VideoFeatures, validate_features)
 
@@ -50,6 +51,12 @@ class GeminiFeatureExtractor(GeminiHookTester):
                     "paid project only and never falls back to GEMINI_API_KEY")
         super().__init__(client=client, api_key=api_key, **kw)
 
+    def _thinking_config(self):
+        """Pin thinking level to medium (03b row 1.9); hook test keeps its config."""
+        from google.genai import types
+        return types.ThinkingConfig(
+            include_thoughts=True, thinking_level=types.ThinkingLevel.MEDIUM)
+
     def _schema(self, schema_version: str):
         return VideoFeatures
 
@@ -60,6 +67,11 @@ class GeminiFeatureExtractor(GeminiHookTester):
         rec = super().analyze(*args, **kwargs)
         rec["schema_version"] = PROMPT_VERSION
         return rec
+
+
+def blind_duration(path: Path) -> float:
+    """ffprobe duration of the blinded file Gemini sees (03b row 1.11)."""
+    return float(probe(path)["duration_s"])
 
 
 def pick_dev_videos(n: int, seed: int = C.SEED) -> pd.DataFrame:
@@ -155,17 +167,21 @@ def main(argv=None) -> int:
             if out.exists():
                 skipped += 1
                 continue
-            dur = float(v["duration_seconds"])
-            if spent + estimate_call_cost(args.model, dur, args.fps) > BUDGET_CAP_USD:
+            blind_path = C.BLIND_DIR / f"{v['blind_id']}.mp4"
+            if spent + estimate_call_cost(args.model, float(v["duration_seconds"]),
+                                          args.fps) > BUDGET_CAP_USD:
                 log.error("budget cap would be exceeded (spent $%.2f); aborting", spent)
                 return 1
+            dur = blind_duration(blind_path)  # file duration, not the export's rounded value
             rec = extractor.analyze(
-                v["blind_id"], C.BLIND_DIR / f"{v['blind_id']}.mp4",
+                v["blind_id"], blind_path,
                 template.format(duration_s=dur), dur,
                 fps=args.fps, media_resolution=args.resolution,
                 prompt_version=PROMPT_VERSION, prompt_sha256=prompt_sha)
             rec.update({"run_id": run_id, "split": args.split,
-                        "video_id": v["video_id"]})
+                        "video_id": v["video_id"],
+                        "duration_s_file": dur,
+                        "duration_s_export": float(v["duration_seconds"])})
             out.write_text(json.dumps(rec, indent=2))
             spent += rec.get("cost_usd_paid_equiv", 0)
             done += 1

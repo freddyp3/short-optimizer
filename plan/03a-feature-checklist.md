@@ -118,7 +118,7 @@ Removed in the 2026-11-03 review (not extracted): `game_content`, `people_on_cam
 | # | Field | Type | Definition | Hyp | Use |
 |---|---|---|---|---|---|
 | B1 | `t_first_event_s` | num | first moment something happens that is not setup: first action, first text that poses the premise, first reveal or joke | − | full |
-| B2 | `opening_frame` | enum{mid_action, premise_card, menu_or_lobby, loading_or_black, static_image, irl_setup} | what is on screen at 0.0-0.5 s. Derived: `opening_dead` = menu_or_lobby or loading_or_black | opening_dead − | full |
+| B2 | `opening_frame` | enum{mid_action, premise_card, menu_or_lobby, loading_or_black, static_image, irl_setup} | what is on screen at 0.0-0.5 s. Derived: `opening_dead` = menu_or_lobby or loading_or_black. **Resolved with code (2026-11-04, creator's call; Gemini's raw answer kept as `opening_frame_gemini`):** (1) G9 `open_black` → loading_or_black, unless Gemini said premise_card (text on a black background); (2) else, if Gemini said mid_action or static_image, G9 `open_still` decides: still → static_image, moving → mid_action; (3) else Gemini's answer. premise_card, menu_or_lobby, irl_setup and a non-black loading screen are semantic and stay Gemini's | opening_dead − | full |
 | B3 | `t_premise_clear_s` | num or null | first moment a viewer knows what to wait for (a question is posed, a stake is visible: low health, a box about to open, a 1v1). null = never | − (null worst) | **core** |
 | B4 | `premise_type` | enum{explicit_question_or_tease, implicit_situation, payoff_first, none} | explicit: text or voice poses a question or "wait for it". implicit: the situation obviously will resolve. payoff_first: the best moment is shown immediately, then context. none: montage/vibe | ± (moderator; needed for the promise-vs-format ablation) | full |
 | B5 | `premise_legible_muted` | bool | with the sound off, the premise is still clear by 3 s | + | full |
@@ -142,7 +142,7 @@ Removed in the 2026-11-03 review (not extracted): `game_content`, `people_on_cam
 
 | # | Field | Type | Definition | Hyp | Use |
 |---|---|---|---|---|---|
-| D1 | `ending` | enum{cut_on_payoff, short_tail, long_tail, outro_or_black, result_screen_hold, cliffhanger} | cut_on_payoff: ends ≤ 1 s after the last payoff. short_tail: 1-3 s. long_tail: > 3 s of post-payoff footage. outro_or_black: editor outro card or black. result_screen_hold: match result screen held > 2 s. Derived: `dead_ending` = long_tail or outro_or_black | dead_ending − | full (the core uses the tail in seconds, C1) |
+| D1 | `ending` | enum{cut_on_payoff, short_tail, long_tail, outro_or_black, result_screen_hold, cliffhanger} | cut_on_payoff: ends ≤ 1 s after the last payoff. short_tail: 1-3 s. long_tail: > 3 s of post-payoff footage. outro_or_black: editor outro card or black. result_screen_hold: match result screen held > 2 s. Derived: `dead_ending` = long_tail or outro_or_black. **Resolved with code (2026-11-04, creator's call; Gemini's raw answer kept as `ending_gemini`):** if Gemini said outro_or_black, result_screen_hold or cliffhanger, keep it; otherwise the category comes from `tail_after_last_payoff_s` (C1, code): ≤ 1.0 s cut_on_payoff, ≤ 3.0 s short_tail, else long_tail (no payoffs → tail = duration → long_tail) | dead_ending − | full (the core uses the tail in seconds, C1) |
 | D2 | `loop_seam` | ord{broken, compatible, seamless} | seamless: last frame/audio flows into the first (same scene, continuing motion or music). compatible: abrupt, but the opening reads as a natural restart (e.g. a premise card). broken: ends on an outro/black/result screen or a dead end | + (× short) | **core** (+ interaction; substitute: G6 `first_last_phash_dist`) |
 | D3 | `rewatch_trigger` | enum{none, recontextualised_opening, blink_and_miss, ambiguity, audio_moment} | recontextualised: the ending changes the meaning of the start. blink_and_miss: the payoff lasts under ~0.7 s or is small on screen (absorbs the former `main_payoff_visibility`). ambiguity: unclear who did what. audio_moment: a sound people replay. Derived: `rewatch_trigger_any` | any + vs none (× short); ambiguity ± | full |
 
@@ -152,7 +152,7 @@ Removed in the 2026-11-03 review (not extracted): `game_content`, `people_on_cam
 |---|---|---|---|---|---|
 | E1 | `audio_bed` | enum{game_only_or_none, music, meme_sound, live_voices, voiceover, mixed} | meme_sound: a recognisable clip/sound that is itself part of the joke | music/meme + vs game_only | full, desc |
 | E2 | `audio_visual_sync` | bool | cuts or actions land on beats or on the sound's punchline | + | full |
-| E3 | `t_audio_change_s` | num or null | the main audio change: drop, switch, start of the key voice line. Derived: `audio_aligned_with_payoff` = abs(t_audio_change − t_main_payoff) ≤ 0.5 s | aligned + | full |
+| E3 | `t_audio_change_s` | num or null | the main audio change: drop, switch, start of the key voice line. Still extracted (prompt v2), but **desc only since 2026-11-04** (creator's call): the audio timing feature is code-measured G8 `t_loudness_peak_s`, and `audio_aligned_with_payoff` is replaced by G8 `loudness_peak_aligned_with_payoff` | ∅ | desc |
 | E4 | `audio_carries_payoff` | bool | the payoff is in the sound (voice line, SFX) rather than the picture | ± (− when C9 is false) | full |
 
 ### F. Register (descriptive, hypothesis-bearing; F3-F4 are the game-specific block)
@@ -173,6 +173,7 @@ Removed in the 2026-11-03 review (not extracted): `game_content`, `people_on_cam
 | G3 | `motion_mean`, `motion_first3s`, `motion_last3s` | mean absolute frame difference at 4 fps, downscaled | + | full |
 | G4 | `static_frac` | share of 0.5 s windows with motion below a threshold | − (objective dead-time proxy) | full; core substitute for C6 |
 | G5 | `black_frac` | share of near-black frames | − | full (expected to fail the prevalence rule) |
+| G9 | `open_black`, `open_still` | frames sampled in [0, 0.5) s at the G3 rate: `open_black` = every one has mean luma below the G5 black threshold; `open_still` = every frame difference inside [0, 0.5) s is below the G4 static threshold. Only used to resolve B2 (added 2026-11-04) | ∅ | resolution of B2 only |
 | G6 | `first_last_phash_dist` | perceptual-hash distance between first and last frame (`imagehash`) | − (objective loop proxy) | full; core substitute for D2 |
 | G7 | `loudness_lufs`, `loudness_range`, `silence_frac`, `audio_onset_s` | ffmpeg `ebur128` / `silencedetect` | onset −, silence − | full |
 | G8 | `t_loudness_peak_s`, `onsets_per_s` | short-time RMS envelope. Derived: `loudness_peak_aligned_with_payoff` | aligned + | full |

@@ -41,6 +41,8 @@ class MeasureParams:
     static_motion_max: float = 0.01  # mean |diff| / 255 below this = static window
     static_window_s: float = 0.5
     black_luma_max: float = 16 / 255
+    open_window_s: float = 0.5       # opening window for the G9 open_* features
+    open_fps: float = 10.0           # decode rate for the opening window (1 s clip)
     edge_window_s: float = 3.0       # "first 3 s" / "last 3 s"
     silence_noise_db: float = -35.0
     silence_min_s: float = 0.3
@@ -59,6 +61,7 @@ FEATURE_COLUMNS = [
     "first_last_dhash_dist", "first_last_pixel_diff",
     "loudness_lufs", "loudness_range", "silence_frac", "audio_onset_s",
     "t_loudness_peak_s", "loudness_peak_frac", "onsets_per_s",
+    "open_first_frame_black", "open_motion", "open_luma",
 ]
 
 
@@ -134,6 +137,45 @@ def motion_stats(frames: np.ndarray, p: MeasureParams) -> dict:
         "static_frac": float((windows < p.static_motion_max).mean()),
         "black_frac": float((frames.mean(axis=(1, 2)) / 255 < p.black_luma_max).mean()),
     }
+
+
+def opening_stats(frames: np.ndarray, p: MeasureParams) -> dict:
+    """G9 opening features from frames decoded at p.open_fps (first 1 s of the file).
+
+    Window = frames with index i where i / p.open_fps < p.open_window_s (at 10 fps:
+    indices 0..4). open_first_frame_black = frame 0's mean luma is below the black
+    threshold; open_motion = median consecutive-frame diff / 255 inside the window
+    (None with <2 windowed frames); open_luma = mean luma / 255 inside the window.
+    """
+    t = frames.shape[0]
+    n = min(t, int(np.ceil(p.open_window_s * p.open_fps - 1e-9)))
+    if n == 0:
+        return {"open_first_frame_black": None, "open_motion": None, "open_luma": None}
+    luma = frames[:n].astype(np.float32).mean(axis=(1, 2)) / 255.0
+    out = {
+        "open_first_frame_black": bool(luma[0] < p.black_luma_max),
+        "open_luma": float(luma.mean()),
+    }
+    if n < 2:
+        out["open_motion"] = None
+    else:
+        f = frames[:n].astype(np.int16)
+        d = np.abs(f[1:] - f[:-1]).mean(axis=(1, 2)) / 255.0
+        out["open_motion"] = float(np.median(d))
+    return out
+
+
+def opening_frames(path: Path, p: MeasureParams) -> np.ndarray:
+    """Decode only the first 1 s to a [T, H, W] uint8 array at p.open_fps."""
+    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-loglevel", "error", "-t", "1",
+               "-i", str(path), "-an",
+               "-vf", f"fps={p.open_fps},scale={p.frame_w}:{p.frame_h}:flags=area,format=gray",
+               "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+    if cp.returncode != 0:
+        raise RuntimeError(f"opening decode failed for {path.name}: {cp.stderr.decode(errors='replace')[-300:]}")
+    buf = np.frombuffer(cp.stdout, dtype=np.uint8)
+    n = len(buf) // (p.frame_w * p.frame_h)
+    return buf[: n * p.frame_w * p.frame_h].reshape(n, p.frame_h, p.frame_w)
 
 
 def dhash(frame: np.ndarray, grid: tuple[int, int] = (8, 9)) -> int:
@@ -255,6 +297,7 @@ def measure(path: Path, p: MeasureParams = DEFAULT_PARAMS) -> dict:
 
     frames = frames_gray(path, p)
     out.update(motion_stats(frames, p))
+    out.update(opening_stats(opening_frames(path, p), p))
     out.update(loop_proxies(frames))
 
     if out["has_audio"]:
