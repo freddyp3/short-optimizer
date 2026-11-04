@@ -249,11 +249,19 @@ class GeminiHookTester:
             return rec2
         return rec
 
-    def _call_with_retry(self, contents, schema_version="v1"):
+    def _schema(self, schema_version: str):
+        """Response schema for the call. Overridable (analyze_video uses its own)."""
         from src.evals.hook_test.schema import schema_class
+        return schema_class(schema_version)
+
+    def _validate(self, data, duration_s: float, schema_version: str = "v1"):
+        """Validate parsed JSON. Overridable; returns (result, reason, flags)."""
+        return validate_result(data, duration_s, schema_version)
+
+    def _call_with_retry(self, contents, schema_version="v1"):
         for attempt in range(C.MAX_RETRIES + 1):
             try:
-                return self._generate(contents, schema_class(schema_version))
+                return self._generate(contents, self._schema(schema_version))
             except Exception as e:
                 if is_daily_quota(e):
                     raise DailyQuotaExceeded(
@@ -312,7 +320,7 @@ class GeminiHookTester:
             rec.update(status="invalid", invalid_reason="unparseable JSON",
                        result=None)
             return rec
-        r, reason, flags = validate_result(data, duration_s, schema_version)
+        r, reason, flags = self._validate(data, duration_s, schema_version)
         if reason:
             rec.update(status="invalid", invalid_reason=reason, result=data)
         else:

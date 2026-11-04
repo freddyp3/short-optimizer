@@ -1,0 +1,135 @@
+"""Response schema for ``analyze_video`` feature extraction (plan/03a-feature-checklist.md, prompts v0-v2).
+
+``VideoFeatures`` doubles as the Gemini ``response_schema`` and the validator for raw responses, like the hook
+test schema. Field order is generation order (the SDK emits ``propertyOrdering`` in declaration order): the
+``timeline`` scratchpad first, then ``payoffs`` (the backbone most derived features come from), then groups A-F,
+then ``notes``. Only Gemini-extracted fields live here; code features (group G), channel history (group H),
+ordinal coding and derived features are computed elsewhere.
+"""
+
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, ValidationError
+
+PROMPT_VERSION = "v2"
+
+# note: weight is an int with bounds, not Literal[1, 2, 3]: Gemini schema enums must be strings.
+class Payoff(BaseModel):
+    t_s: float = Field(ge=0.0)
+    kind: Literal["punchline", "reveal", "kill_or_win", "goal_or_objective", "loot_result",
+                  "fail_or_backfire", "spectacle", "other"]
+    weight: int = Field(ge=1, le=3)
+
+
+class VideoFeatures(BaseModel):
+    timeline: str
+    payoffs: list[Payoff] = Field(default_factory=list, max_length=6)
+
+    # A. Format
+    format_macro: Literal["gameplay_clip", "edit", "text_skit", "irl", "loot_opening", "menu_showcase",
+                          "slideshow", "other"]
+    voice: Literal["none", "creator_live", "group_live", "voiceover", "meme_voice_clip"]
+    text_role: Literal["none", "subtitles", "narrative", "label_only", "mixed"]
+
+    # B. Opening
+    t_first_event_s: float = Field(ge=0.0)
+    opening_frame: Literal["mid_action", "premise_card", "menu_or_lobby", "loading_or_black", "static_image",
+                           "irl_setup"]
+    t_premise_clear_s: Optional[float] = Field(ge=0.0)
+    premise_type: Literal["explicit_question_or_tease", "implicit_situation", "payoff_first", "none"]
+    premise_legible_muted: bool
+    premise_legible_nonplayer: bool
+
+    # C. Structure
+    arc: Literal["single_peak", "builds", "front_loaded", "repeated_same_level", "none"]
+    resolution: Literal["resolved", "partial", "unresolved", "no_premise"]
+    twist: bool
+    surprise_peak: Literal["none", "mild", "strong"]
+    dead_time_s: float = Field(ge=0.0)
+    beat_before_main_payoff: bool
+    info_new_per_5s: Literal["low", "medium", "high"]
+    main_payoff_legible_muted: bool
+
+    # D. Ending and loop
+    ending: Literal["cut_on_payoff", "short_tail", "long_tail", "outro_or_black", "result_screen_hold",
+                    "cliffhanger"]
+    loop_seam: Literal["broken", "compatible", "seamless"]
+    rewatch_trigger: Literal["none", "recontextualised_opening", "blink_and_miss", "ambiguity", "audio_moment"]
+
+    # E. Audio
+    audio_bed: Literal["game_only_or_none", "music", "meme_sound", "live_voices", "voiceover", "mixed"]
+    audio_visual_sync: bool
+    t_audio_change_s: Optional[float] = Field(ge=0.0)
+    audio_carries_payoff: bool
+
+    # F. Register
+    primary_appeal: Literal["humor", "skill_hype", "suspense_luck", "relatable_frustration", "curiosity_info",
+                            "aesthetic_vibe", "nostalgia", "drama"]
+    relatability: Literal["none", "shared_player_experience", "in_group_reference", "creator_personal"]
+    game_moment_kind: Literal["elimination", "multi_kill_or_wipe", "clutch_low_hp", "goal_or_objective",
+                              "rare_drop", "skin_reveal", "glitch_or_bug", "troll_or_teaming", "none"]
+    big_number_on_screen: bool
+    low_health_visible: bool
+    result_screen_shown: bool
+
+    uncertain_fields: list[str] = Field(default_factory=list)  # debugging only, never a model input
+    notes: str = ""
+
+
+TIMESTAMP_FIELDS = ("t_first_event_s", "t_premise_clear_s", "t_audio_change_s")
+TOLERANCE_S = 0.5
+
+
+def validate_features(data, duration_s: float):
+    """Validate a parsed JSON object against the schema and the video's duration.
+
+    Returns (features, invalid_reason, quality_flags). ``features`` is None when invalid_reason is set.
+    Out-of-range timestamps invalidate; internal inconsistencies are quality flags, read in the DEV pass
+    (plan/03a section 6.1) to decide which definitions Gemini misreads.
+    """
+    if isinstance(data, dict):
+        extra = set(data) - set(VideoFeatures.model_fields)
+        if extra:
+            return None, f"schema: extra field {sorted(extra)[0]}", []
+        for p in data.get("payoffs") or []:
+            if isinstance(p, dict) and (pextra := set(p) - set(Payoff.model_fields)):
+                return None, f"schema: extra field payoffs.{sorted(pextra)[0]}", []
+    try:
+        f = VideoFeatures.model_validate(data)
+    except ValidationError as e:
+        return None, f"schema: {e.errors()[0]['loc']} {e.errors()[0]['msg']}", []
+
+    limit = duration_s + TOLERANCE_S
+    for name in TIMESTAMP_FIELDS:
+        t = getattr(f, name)
+        if t is not None and t > limit:
+            return None, f"{name} {t} > duration {duration_s} + {TOLERANCE_S}", []
+    if any(p.t_s > limit for p in f.payoffs):
+        return None, f"payoff t_s > duration {duration_s} + {TOLERANCE_S}", []
+    if f.dead_time_s > limit:
+        return None, f"dead_time_s {f.dead_time_s} > duration {duration_s}", []
+
+    flags = []
+    times = [p.t_s for p in f.payoffs]
+    if times != sorted(times):
+        flags.append("payoffs_not_time_ordered")
+    n_main = sum(p.weight == 3 for p in f.payoffs)
+    if f.payoffs and n_main != 1:
+        flags.append(f"main_payoff_count:{n_main}")
+    if not f.payoffs and f.arc != "none":
+        flags.append(f"arc_without_payoffs:{f.arc}")
+    if f.t_premise_clear_s is not None and f.t_premise_clear_s < f.t_first_event_s - TOLERANCE_S:
+        flags.append(f"first_event_after_premise:{f.t_first_event_s:.1f}>{f.t_premise_clear_s:.1f}")
+    if (f.t_premise_clear_s is None) != (f.resolution == "no_premise"):
+        flags.append("premise_null_vs_resolution_mismatch")
+    if f.payoffs and f.dead_time_s > max(times) - f.t_first_event_s + TOLERANCE_S:
+        flags.append(f"dead_time_past_last_payoff:{f.dead_time_s:.1f}s")
+    if f.payoffs:
+        tail = duration_s - max(times)
+        expected = {"cut_on_payoff": (None, 1.0), "short_tail": (1.0, 3.0), "long_tail": (3.0, None)}
+        lo, hi = expected.get(f.ending, (None, None))
+        if (lo is not None and tail < lo - TOLERANCE_S) or (hi is not None and tail > hi + TOLERANCE_S):
+            flags.append(f"ending_vs_tail:{f.ending}:{tail:.1f}s")
+    return f, None, flags

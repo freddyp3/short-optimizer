@@ -133,7 +133,7 @@ Removed in the 2026-11-03 review (not extracted): `game_content`, `people_on_cam
 | C3 | `resolution` | enum{resolved, partial, unresolved, no_premise} | does the video answer what the premise set up. Derived: `unresolved` bool | unresolved − | full |
 | C4 | `twist` | bool | the ending contradicts the expectation the setup created | + | full |
 | C5 | `surprise_peak` | ord{none, mild, strong} | the biggest expectation violation anywhere. strong: could not be predicted from the setup. mild: predictable kind, unpredictable detail | + | full (judgement field) |
-| C6 | `dead_time_s` | num | total seconds after `t_first_event_s` with nothing new: waiting, walking, menu navigation, repeated identical action, frozen frame, outro. A pause under 2 s immediately before a payoff is *not* dead time | − | **core** (substitute: G4 `static_frac`) |
+| C6 | `dead_time_s` | num | total seconds between `t_first_event_s` and the last payoff with nothing new: waiting, walking, menu navigation, repeated identical action, frozen frame. Nothing after the last payoff counts (that is `tail_after_last_payoff_s`; changed in prompt v2 to remove the overlap). No payoffs: count to the end. A pause under 2 s immediately before a payoff is *not* dead time | − | **core** (substitute: G4 `static_frac`) |
 | C7 | `beat_before_main_payoff` | bool | a deliberate hold of 0.5-2 s right before the main payoff | + | full |
 | C8 | `info_new_per_5s` | ord{low, medium, high} | how often something new is shown or said (new clip, new text, new event). low: the same shot/text holds for 5 s or more | + | full |
 | C9 | `main_payoff_legible_muted` | bool | the main payoff works with the sound off | ± | full |
