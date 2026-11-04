@@ -53,6 +53,14 @@ v3 = v2 word for word, except `timeline`:
 
 - **Videos:** 30 from the `train` split of `src/models/pool.py` (never DEV, GATE or HELDOUT), stratified into duration
   thirds (10 each), sampled with seed 340. Selection written to `data/features/gemini/consistency_selection.csv`.
+- **Duplicates (amendment 2026-11-04, before any call on these videos):** the first draw contained the same upload
+  twice ("TOP 5 MELODIE SAD PINS", `v2a54836c` / `vda204d7d`). The whole eligible pool (all four splits) is scanned
+  for duplicates by frame hashes, and duplicates are removed by a fixed, outcome-blind rule: within a group keep the
+  earliest-published upload; a train video that duplicates a DEV/GATE/HELDOUT video is dropped from train (the
+  evaluation sets are frozen and never edited; duplicates between them are only reported). Exclusions live in
+  `data/features/duplicates_exclude.json` and `src.models.pool.train_rows` applies them. The 30 are then re-drawn
+  with the same seeds on the de-duplicated train pool. The same exclusions apply to model training later (a
+  duplicate across CV folds or in the H1 neighbour set would leak).
 - **Blinding:** the training-pool videos have no blinded copies yet (only the 110 hook-test videos do). Create them
   with the hook test's blinding (metadata stripped, random ids) before any call; the contact-sheet leakage check is
   repeated on these 30.

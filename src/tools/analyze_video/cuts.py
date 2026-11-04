@@ -42,13 +42,16 @@ def write_cut_file(blind_id: str, blind_dir: Path = C.BLIND_DIR,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("blind_ids", help="comma-separated blind_ids")
+    ap.add_argument("--blind-dir", type=Path, default=C.BLIND_DIR)
+    ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
     ap.add_argument("--workers", type=int, default=2)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     ids = [s for s in args.blind_ids.split(",") if s]
     with ThreadPoolExecutor(max_workers=min(args.workers, 2)) as ex:
-        for obj in ex.map(write_cut_file, ids):
+        for obj in ex.map(lambda b: write_cut_file(
+                b, blind_dir=args.blind_dir, out_dir=args.out_dir), ids):
             log.info("%s: %d cuts, %.2f s", obj["blind_id"], len(obj["cuts"]),
                      obj["duration_s"])
     return 0

@@ -4,7 +4,9 @@ Reuses the hook test's eligibility funnel and ``hold_resid`` so the label is
 identical to the one the hook test is scored on. Adds a ``split`` column:
 
     train    eligible pool minus every hook-test video  (~126 rows; the only rows
-             anyone may look at per-video before the model is frozen)
+             anyone may look at per-video before the model is frozen). Rows listed
+             in data/features/duplicates_exclude.json are dropped (plan/03b
+             "Duplicates") unless exclude_duplicates=False.
     dev / gate / heldout   from data/evals/hook_test/selection.json
 
     ./venv/bin/python -m src.models.pool            # prints counts per split
@@ -39,8 +41,15 @@ def labelled_pool(export_dir: Path | None = None,
     return pool[POOL_COLS].reset_index(drop=True)
 
 
-def train_rows(**kw) -> pd.DataFrame:
-    return labelled_pool(**kw).query("split == 'train'").reset_index(drop=True)
+DUPLICATES_EXCLUDE = Path("data/features/duplicates_exclude.json")
+
+
+def train_rows(exclude_duplicates: bool = True, **kw) -> pd.DataFrame:
+    df = labelled_pool(**kw).query("split == 'train'").reset_index(drop=True)
+    if exclude_duplicates and DUPLICATES_EXCLUDE.exists():
+        excl = set(json.loads(DUPLICATES_EXCLUDE.read_text())["exclude"])
+        df = df[~df["video_id"].isin(excl)].reset_index(drop=True)
+    return df
 
 
 if __name__ == "__main__":
