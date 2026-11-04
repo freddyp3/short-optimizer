@@ -89,7 +89,9 @@ class TimelineEntry(BaseModel):
 class VideoFeaturesV3(VideoFeatures):
     """v3 (plan/03b section 2): the timeline is one entry per fixed 1-second window; all other fields as v2."""
 
-    timeline: list[TimelineEntry] = Field(max_length=61)
+    # no max_length: the API rejects maxItems=61 on this array (400 INVALID_ARGUMENT, probed 2026-11-04);
+    # the exact window count is enforced in validate_features instead
+    timeline: list[TimelineEntry]
 
 
 SCHEMAS = {"v0": VideoFeatures, "v1": VideoFeatures, "v2": VideoFeatures, "v3": VideoFeaturesV3}

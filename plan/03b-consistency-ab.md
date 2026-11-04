@@ -47,7 +47,9 @@ v3 = v2 word for word, except `timeline`:
   If nothing new happens, write `no change`. Describe, never evaluate.
 - Payoffs and every other field are filled from the timeline, as in v2; payoff `t_s` keeps 0.1 s precision.
 - Validator: entry count = N and each `start_s` / `end_s` within 0.05 s of the given window, otherwise the record is
-  invalid (one automatic retry, as now). Schema `max_length` is set to 61 (the eligible pool tops out at 60 s).
+  invalid (one automatic retry, as now). No `max_length` on the timeline array: the API rejects `maxItems` = 61 there with 400 INVALID_ARGUMENT (found on
+  the first v3 call, 2026-11-04, isolated with text-only probe calls; no v3 record existed yet). The validator's exact
+  window-count check enforces the length instead.
 
 ## 3. The A/B experiment
 

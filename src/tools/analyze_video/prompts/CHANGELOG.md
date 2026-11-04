@@ -38,3 +38,6 @@ Changes vs v2 (only the timeline):
   `{start_s, end_s, seen, heard}`. "no change" allowed only when nothing new happens; "silence" when nothing is audible.
 - No scene-cut hints in the prompt.
 - Validator: a timeline whose entry count, order or bounds (±0.05 s) do not match the windows is invalid.
+- 2026-11-04: removed max_length from the v3 timeline array. The API rejects maxItems=61 there (400
+  INVALID_ARGUMENT on the first A/B call, isolated with text-only probes); the validator's window-count check
+  enforces the length. No v3 record existed yet, prompt text unchanged.
