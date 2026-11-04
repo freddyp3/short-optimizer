@@ -1,8 +1,177 @@
-# Phase 8: API, Deploy, Security, Growth (path to a public product for 500+ creators)
+# Phase 8 (now build Step 9, stretch): API, Deploy, Security, Growth (public product for 500+ Brawl Stars creators)
 
 Depends on: phase 3 (`analyze_video`), 4 (trend tools), 5 (orchestrator), 7 (MCP), `src/obs/` (tracing + cost).
 Milestones: **M2 ~early Nov** = shipped web app (invite-only/soft launch). **M3** = hardened, public, growth to 500+ creators.
 Research date: 2026-10-01. Items marked VERIFY must be rechecked against the live Google docs before acting.
+
+---
+
+## 0c. Revision 2026-11-04: this whole phase is now a stretch goal (build Step 9)
+
+Decided in [README](README.md) "Revision 2026-11-04": the MCP server + Gemini agent come first. This phase starts only
+after Steps 5-8 work locally. Until then nothing here is built. What still holds and what changes when it does start:
+
+- **Still holds:** Cloud Run (0b), the upload flow, Cloud Tasks, privacy/policy obligations, the growth plan; but
+  aimed at **Brawl Stars creators only** ("500+ creators" means Brawl Stars creators).
+- **The API runs the Gemini agent client** (phase 5 §0) against the MCP server, instead of a Claude orchestrator.
+  Remove Anthropic from the processor list (privacy policy, 4.x) and from cost tables; add Gemini agent cost.
+- **Remote MCP (HTTP + OAuth)** from phase 7 sections 5 and 8.2 is built here, not in Step 5 (phase 7 §0b.4).
+- **Injection defense is not deferred to this phase.** Comment-borne injection tests (phase 7 §0b.2) and the agent
+  injection suite (phase 5 §11.3) are built with Steps 5-7. This phase adds the web-specific layers (rendering, uploads,
+  per-user rate limits, abuse signals).
+- **New policy item:** if the 30-day pool shipped (Step 7), the privacy policy and in-app notice must describe it (other
+  channels' public comments, no author data, deleted after 30 days), per the Step 4 policy read.
+- **Milestones** M2/M3 at the top of this doc are replaced by the README milestones (M2 = MCP + agent, M3 = reaction pool
+  + eval, stretch = web app).
+
+---
+
+## 0b. Revision 2026-11-03: deploy target is Google Cloud Run (supersedes conflicting parts below)
+
+**Decision.** Deploy on **Google Cloud Run** (not Fly.io). Reason: resume value (the SWE resume names Cloud Run and
+BigQuery, and GCP experience is what readers recognise). Cost of the decision, accepted knowingly: uploads must bypass the
+API (Cloud Run caps HTTP/1 request bodies at 32 MiB) and background work needs **Cloud Tasks** instead of the SQL
+queue in 1.3. Both are standard GCP patterns, which is the point. Section 5's comparison table stays as the record of
+the alternatives; its Fly.io recommendation is withdrawn.
+
+Facts this design rests on (checked 2026-11-03 against docs.cloud.google.com; re-check before building):
+
+- Cloud Run services: request timeout default 5 min, max **60 min**; **32 MiB** max HTTP/1 request body (no cap with
+  end-to-end HTTP/2, which needs an h2c server; not worth it for us); responses may stream (chunked), so SSE works;
+  default 80 concurrent requests per instance; local filesystem is in-memory and counts against the memory limit.
+- Cloud Tasks: **at-least-once** delivery, "your handlers should be idempotent"; HTTP target deadline default 10 min,
+  max **30 min**; a 2xx response completes the task, anything else is retried per the queue `RetryConfig`;
+  **user-specified task IDs de-duplicate** (`ALREADY_EXISTS`), hashed IDs are recommended for latency, and an ID is
+  released up to 4 hours after the task ran or was deleted (24 h stated on the quotas page; treat 24 h as the window).
+- Cloud Run Jobs: run-to-completion containers, task timeout default 10 min up to 7 days, retries default 3 (0-10).
+  Used here for batch work only (nightly evals, injection suite, purge, channel-export refresh).
+
+### 0b.1 Architecture
+
+```
+ browser ──PUT (V4 signed URL)──▶ GCS bucket  uploads/{user}/{sha256}     (lifecycle: delete after 1 day)
+    │                                     ▲ read + delete
+    │ POST /v1/uploads, /v1/jobs, SSE     │
+    ▼                                     │
+ Cloud Run service "api"  ──create task──▶ Cloud Tasks queue "reviews" ──POST /internal/run/{job_id} (OIDC)──▶ Cloud Run service "worker"
+   FastAPI, public, 1 vCPU/512 MiB         max_concurrent_dispatches=3        same image, private (IAM), 2 vCPU/2 GiB, concurrency 1
+   enqueue + read models only              retries w/ backoff                 media_guard -> analyze_video -> orchestrator -> result
+    │                                                                              │
+    └──────────────── Postgres (Neon free tier; Cloud SQL if all-GCP is wanted) ◀──┘   jobs, job_events, users, baselines
+ Cloud Run Jobs (batch, Cloud Scheduler): evals-nightly, injection-suite, purge, channel-export
+ Secret Manager -> env; OTel -> Cloud Trace; JSON logs -> Cloud Logging -> log sink -> BigQuery run_records
+```
+
+Two Cloud Run **services** from one image (`src.api.main:app` public; `src.api.worker_main:app` internal, routes
+`/internal/run/{job_id}` and `/healthz` only). The worker is a request-driven service, not a Cloud Run Job, because
+a warm instance answers in seconds while a Job execution pays a cold start per review (bad for the p95 number).
+Alternative kept open: run each review as a Cloud Run Job execution (fresh container per untrusted file, stronger
+ffmpeg isolation) if the media-sandbox risk ever outweighs ~5-20 s of p95.
+
+### 0b.2 Upload flow (replaces 1.4's streaming upload)
+
+1. Browser hashes the file (`crypto.subtle.digest("SHA-256")`; files are <= 100 MB) and calls
+   `POST /v1/uploads {sha256, size_bytes, content_type}`. The API validates size/type caps, and if the object
+   `uploads/{user_id}/{sha256}` already exists returns `{already_uploaded: true}` (same file twice = no second upload).
+2. Otherwise the API returns a **V4 signed PUT URL** (TTL 15 min) that pins `Content-Type` and
+   `x-goog-content-length-range: 0,104857600`, so GCS enforces the size cap, not us. Signing on Cloud Run uses the
+   IAM Credentials API (`signBlob`; the api service account needs `roles/iam.serviceAccountTokenCreator` on itself)
+   because there is no private key on the instance (VERIFY the header name and the `generate_signed_url(...)`
+   arguments in the current `google-cloud-storage`).
+3. Bucket: uniform bucket-level access, no public access, CORS allowing `PUT` from the web origin only, lifecycle
+   rule deletes objects after 1 day (the worker deletes on completion anyway).
+4. The API never receives media bytes. The 32 MiB limit becomes irrelevant and the public service has no media
+   parsing surface at all.
+
+### 0b.3 Job flow and the exactly-once claim
+
+1. `POST /v1/jobs {sha256, title?, notes?, baseline}`: the API checks the object exists (metadata only), inserts a
+   `jobs` row with a **unique index on `(user_id, sha256, prompt_version)`** (a duplicate insert returns the existing
+   job, 200 not 202), then creates a Cloud Tasks task with ID `r-{sha256[:24]}-{prompt_version}-{user_hash[:8]}`
+   (hash first, as Google recommends). `ALREADY_EXISTS` from Cloud Tasks is also mapped to "return the existing job".
+2. The queue dispatches `POST /internal/run/{job_id}` to the worker with an OIDC token minted for `tasks-sa`; the
+   worker service requires IAM authentication and grants `roles/run.invoker` to `tasks-sa` only. In-app the handler
+   additionally requires the `X-CloudTasks-QueueName` header (sanity, not security) and logs
+   `X-CloudTasks-TaskRetryCount`.
+3. Handler contract: load the job; if `status in (done, failed)` return **200 immediately** (a duplicate delivery
+   does nothing); otherwise resume from the last completed **stage checkpoint** (`jobs.stage`, `jobs.stage_outputs`
+   JSON, written after each of `validating -> transcoding -> analyzing_video -> fetching_trends -> writing_plan`).
+   `analyze_video` is additionally content-addressed (phase 3, 3.7), so even a lost checkpoint never re-bills Gemini.
+4. Response semantics: 2xx on success **and** on permanent failure (job marked `failed`, user credit refunded, no
+   retry); 503 on transient failure (upstream 429/503, quota) so Cloud Tasks retries. Queue `RetryConfig`:
+   `max_attempts=3, min_backoff=10s, max_backoff=300s, max_doublings=3`; `dispatch_deadline=600s`
+   (our per-job wall clock is 180 s). After the last attempt a Cloud Scheduler sweep marks still-`running` jobs failed
+   and refunds (Cloud Tasks has no dead-letter queue).
+5. Rate and concurrency: queue `max_concurrent_dispatches=3`, `max_dispatches_per_second=1`; worker
+   `--concurrency=1 --max-instances=3 --timeout=600 --cpu=2 --memory=2Gi --execution-environment=gen2`
+   (gen2 for full Linux compatibility: `ulimit` for ffmpeg works). Per-user caps from 2.3 are enforced at enqueue.
+6. Worker downloads the object to `/tmp` (in-memory, hence 2 GiB), **re-computes SHA-256 and rejects a mismatch**
+   (never trust the client hash), runs `media_guard`, deletes the object in `finally`.
+
+What this makes true, in interview words: delivery is at-least-once; processing is idempotent through three layers
+(unique job key, de-duplicated task ID, stage checkpoints plus content-addressed caching), so a retry or a duplicate
+delivery never repeats paid work. Measured from the BigQuery run records as `duplicate deliveries observed` vs
+`duplicate model calls made` (target: >0 vs 0). The resume line "keyed on the video hash so Cloud Tasks retries never
+repeat work" is this design; say "Cloud Run worker" not "Cloud Run Jobs" for the review path.
+
+### 0b.4 Services, IAM, data stores
+
+| Component | Config |
+|---|---|
+| `api` service | public (`--allow-unauthenticated`), `--cpu=1 --memory=512Mi --concurrency=80 --timeout=900` (SSE streams re-connect with `Last-Event-ID`), `--min-instances=1` during launch week only (cold start breaks SSE UX; VERIFY idle-instance price), `--max-instances=5`, custom domain via Cloud Run domain mapping or a global LB later |
+| `worker` service | private (IAM), see 0b.3 step 5; `--min-instances=0` |
+| Service accounts | `api-sa`: `cloudtasks.enqueuer`, `iam.serviceAccountUser` on `tasks-sa` (to set its OIDC identity on tasks), `iam.serviceAccountTokenCreator` on itself (signed URLs), `storage.objectUser` on the bucket, `secretmanager.secretAccessor`. `worker-sa`: `storage.objectUser` on the bucket, `secretmanager.secretAccessor`, `cloudtrace.agent`. `tasks-sa`: `run.invoker` on `worker` only. Nothing has project-wide editor |
+| Database | **Postgres on Neon free tier** for M2 (Cloud Run has no persistent disk, so the SQLite option in 1.3 is gone); `asyncpg` over TLS; Alembic as planned. Switch to **Cloud SQL** only if an all-GCP story is wanted (VERIFY price, roughly $10+/month, no scale-to-zero) |
+| Media | GCS bucket as in 0b.2; nothing else stores media |
+| Secrets | Secret Manager, mounted with `--set-secrets=ANTHROPIC_API_KEY=anthropic:latest,GEMINI_API_KEY=gemini:latest,SESSION_SECRET=session:latest,DATABASE_URL=db-url:latest`; `.env` stays local-only |
+| Region | `us-central1` unless the channel demographics are mostly EU, then `europe-west1`; LLM APIs are global so it only affects SSE latency |
+| Batch (Cloud Run Jobs + Cloud Scheduler) | `evals-nightly` (held-out eval, small budget), `injection-suite`, `purge` (orphaned objects, expired results, failed-after-retries sweep), `channel-export` (owner data refresh; secrets for OAuth tokens live only in Secret Manager) |
+
+### 0b.5 Observability on GCP (extends section 6)
+
+- OTel spans from `src/obs/` export to **Cloud Trace** through the OTLP exporter already planned in phase 3 (4.4);
+  trace id = `job_id`.
+- Structured JSON logs to stdout go to Cloud Logging automatically; include the `logging.googleapis.com/trace` field so
+  logs and traces link. Log-redaction filter as in section 6.
+- One **run record** per job is logged as `jsonPayload.kind="run_record"` (stage latencies, tokens, USD, outcome,
+  retry count, cache hits, user hash). A **log sink to BigQuery** (dataset `shorts_copilot`, table `run_records`,
+  partitioned by day) is the dashboard store; SQL views give runs/day, p50/p95 per stage, $/run, failure rate by
+  reason, duplicate-delivery count. Free tier covers it (10 GiB storage, 1 TiB queries/month; VERIFY). Looker Studio
+  on the views if a picture is wanted. **This is where the resume numbers come from.**
+- Alerts: Cloud Monitoring policies on log-based metrics (error rate > 10 % / 15 min, budget-kill events) to email;
+  a GCP **Billing budget** with 50/80/100 % alerts plus the provider-side spend limits from 2.3 are mandatory before
+  public launch.
+
+### 0b.6 CI/CD, local dev, tests
+
+- CD: GitHub Actions authenticates with **Workload Identity Federation** (no service-account keys in GitHub), builds
+  the image, pushes to Artifact Registry, `gcloud run deploy api` and `gcloud run deploy worker` from the same digest,
+  then smoke-tests `/readyz` and one canned job. `gcloud run jobs deploy` for the batch jobs from the same digest.
+- Local: `docker-compose.yml` (section 4) stays for parity with `TASKS_BACKEND=local`: a `TaskQueue` interface
+  (`src/api/jobs/queue.py`) with `CloudTasksQueue` (prod) and `LocalQueue` (asyncio, in-process POST to the worker
+  handler, same retry semantics) so nothing in tests needs GCP. A fake GCS (`MEDIA_BACKEND=local` writes to a temp dir
+  and "signed URLs" point at a local PUT route) covers uploads in dev.
+- Tests to add or change (section 10): `test_jobs_lifecycle.py` gains **duplicate delivery -> one result and zero
+  extra model calls**, `ALREADY_EXISTS -> existing job`, `hash mismatch -> failed with 200`, `transient -> 503 ->
+  retried -> resumes at checkpoint`; `test_uploads.py` becomes signed-URL issuance, size/type caps at issuance,
+  `already_uploaded`, and the worker-side hash check; a `@pytest.mark.live` test runs one real review through a
+  dev queue.
+
+### 0b.7 Cost at the 500-creator scale (VERIFY all prices)
+
+Cloud Run free tier per month is 180k vCPU-s, 360k GiB-s, 2M requests. 2,500 reviews x ~60 s x 2 vCPU = 300k vCPU-s
+on the worker, so ~120k vCPU-s billable, in the low single-digit dollars; `--min-instances=1` on `api` is the main
+fixed cost (VERIFY idle pricing, expected ~$10/month) and is launch-week only. Cloud Tasks (1M operations free), GCS,
+Secret Manager, Cloud Trace and BigQuery stay inside free tiers at this volume; Neon is free. Expected total:
+**$0-15/month**, comparable to the Fly.io estimate, plus the LLM spend budgeted in 2.3.
+
+### 0b.8 What this supersedes below
+
+1.1 (`jobs/queue.py`, `jobs/worker.py` roles), 1.2 (`POST /v1/uploads` is now signed-URL issuance), 1.3 (SQL queue ->
+Cloud Tasks; `jobs` table keeps its columns plus `sha256`, `prompt_version`, `stage`, `stage_outputs`, `task_name`),
+1.4 (streaming upload -> direct-to-GCS), 4 (compose is local parity only), 5 (Fly.io -> Cloud Run), 6 (secrets and
+logging on GCP), 9.4 (CD target), 10 (tests above). Everything else, in particular 1.5 media_guard, 2 auth/limits/cost
+caps, 3 frontend, 7 security, 8 legal, 11 growth and 12 measurement, applies unchanged.
 
 ---
 
@@ -63,8 +232,8 @@ src/api/
     baseline.py      PUT /v1/me/baseline (A.5 manual/CSV)
     legal.py         GET /privacy, /terms (static)
   jobs/
-    queue.py         enqueue/claim/ack on the jobs table (SQL-backed queue, SKIP LOCKED on Postgres)
-    worker.py        worker loop: claim job -> run pipeline -> persist result -> emit events
+    queue.py         TaskQueue interface: CloudTasksQueue (prod) / LocalQueue (dev, tests); see 0b.3, 0b.6
+    worker.py        POST /internal/run/{job_id} handler (Cloud Tasks target): resume from checkpoint -> run pipeline -> persist -> emit events
     pipeline.py      glue: media_guard -> analyze_video -> orchestrator -> result (wraps src/agent)
     events.py        append-only job_events table + SSE tail
   security/
@@ -94,6 +263,10 @@ Single upload + job could be one call; kept separate so a failed validation retu
 
 ### 1.3 Async job queue
 
+> **Superseded 2026-11-03 by 0b.3:** the queue is Cloud Tasks and the worker is a second Cloud Run service. The
+> reliability properties below (bounded retries, idempotent stages, refunds, progress events) still apply; the
+> SQL-claim mechanics and the SQLite option do not.
+
 - **M2: SQL-backed queue, in-process worker(s)** in the same container (separate `asyncio` task / `python -m src.api.jobs.worker` process). Rationale: zero extra infra; analysis takes 30-120s so throughput needs are tiny (500 users, ~1-3 runs each/week). `jobs` table: `id, user_id, upload_id, status, attempts, run_after, locked_by, locked_at, result_json, error, cost_usd, created_at, finished_at`. Claim with `UPDATE ... WHERE id=(SELECT ... ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)` on Postgres. SQLite on a volume for M2 only if a single instance; move to Postgres (Neon/Supabase free tier or provider-managed) at M3.
 - Why not Celery/Redis/Arq: extra moving parts, little gain at this scale. Revisit if >5 concurrent jobs queue regularly (measure queue wait p95).
 - **Concurrency cap:** global semaphore `MAX_CONCURRENT_JOBS=3` (Gemini rate limits + memory); per-user max 1 running + 2 queued.
@@ -114,7 +287,11 @@ Single upload + job could be one call; kept separate so a failed validation retu
 | Upload rate | 5 uploads/hour/user, 20/day | |
 | Timeouts | read 60s per chunk; total upload 5 min | slowloris |
 
-Implementation notes: use `request.stream()` / `UploadFile` spooled to a `tempfile` on a size-limited volume, count bytes, abort at the cap and delete partial file. Set the reverse proxy `client_max_body_size` equivalent as a first line of defense. Never trust `Content-Type` or filename; filenames are replaced by a UUID.
+Implementation notes (**superseded 2026-11-03 by 0b.2**: the browser uploads straight to GCS with a signed URL that
+pins the size cap, and the API never receives media bytes; the limits table above still holds, enforced at signed-URL
+issuance and in the worker): ~~use `request.stream()` / `UploadFile` spooled to a `tempfile` on a size-limited volume,
+count bytes, abort at the cap and delete partial file. Set the reverse proxy `client_max_body_size` equivalent as a
+first line of defense.~~ Never trust `Content-Type` or filename; objects are keyed by `sha256`, never by the client's name.
 
 ### 1.5 media_guard pipeline (runs in the worker, in a subprocess with limits)
 
@@ -244,16 +421,19 @@ Requirements: accept video uploads up to 100 MB, background jobs of up to ~3 min
 | Ops overhead | highest (IAM, GCS, queue) | medium | lowest | low |
 | Resume signal | strong (GCP) | moderate | low | low |
 
-**Recommendation: Fly.io for M2/M3.** Reasons: it runs the Docker image as-is, process groups (`app` + `worker`) in one app, auto-stop machines keep cost near zero between sessions, no request-body cap headache for uploads, SSE works, `fly secrets` is adequate, volumes give scratch space for media, and Neon/Supabase free Postgres avoids running a DB. Estimated cost: ~$10-25/month at this scale (VERIFY pricing). Runner-up: **Render** if the owner wants the least ops (managed Postgres, background worker type, but paid tier required to avoid sleep). Cloud Run is the "resume-strongest" but its upload-size and background-CPU quirks add real work (GCS signed-URL uploads, Cloud Tasks/Jobs); revisit only if GCP credits or a GCP-themed resume goal appear.
+**Decision (2026-11-03): Google Cloud Run, for resume value; design in 0b.** The paragraph below was the original
+recommendation and is kept as the record of the runner-up.
 
-Deploy specifics: `fly.toml` with `[http_service] internal_port=8080, force_https=true, auto_stop_machines="stop", min_machines_running=1` during launch week (cold start would break SSE UX), health check on `/readyz`, 2 process groups, region near the main audience (check channel demographics; likely `iad`/`ams`), custom domain with Fly-managed cert, `fly secrets set ANTHROPIC_API_KEY=... GEMINI_API_KEY=... SESSION_SECRET=...`. Deploy via GitHub Action on tag after CI passes (`flyctl deploy --remote-only`, deploy token as a repo secret).
+~~**Recommendation: Fly.io for M2/M3.**~~ Reasons: it runs the Docker image as-is, process groups (`app` + `worker`) in one app, auto-stop machines keep cost near zero between sessions, no request-body cap headache for uploads, SSE works, `fly secrets` is adequate, volumes give scratch space for media, and Neon/Supabase free Postgres avoids running a DB. Estimated cost: ~$10-25/month at this scale (VERIFY pricing). Runner-up: **Render** if the owner wants the least ops (managed Postgres, background worker type, but paid tier required to avoid sleep). Cloud Run is the "resume-strongest" but its upload-size and background-CPU quirks add real work (GCS signed-URL uploads, Cloud Tasks/Jobs); revisit only if GCP credits or a GCP-themed resume goal appear.
+
+Deploy specifics (**superseded by 0b.4 and 0b.6**; Fly.io version kept for reference): `fly.toml` with `[http_service] internal_port=8080, force_https=true, auto_stop_machines="stop", min_machines_running=1` during launch week (cold start would break SSE UX), health check on `/readyz`, 2 process groups, region near the main audience (check channel demographics; likely `iad`/`ams`), custom domain with Fly-managed cert, `fly secrets set ANTHROPIC_API_KEY=... GEMINI_API_KEY=... SESSION_SECRET=...`. Deploy via GitHub Action on tag after CI passes (`flyctl deploy --remote-only`, deploy token as a repo secret).
 
 ---
 
 ## 6. Secrets management and observability
 
 ### Secrets
-- Local: `.env` (gitignored) + `secrets/` (gitignored). Production: `fly secrets` only; no secrets baked into images; `config.py` fails fast on missing required keys.
+- Local: `.env` (gitignored) + `secrets/` (gitignored). Production: **Secret Manager** mounted as env vars (0b.4; was `fly secrets`); no secrets baked into images; `config.py` fails fast on missing required keys.
 - Separate API keys per environment (dev/prod) with provider-side spend limits; rotate on any suspected leak; commit `.env.example` with placeholder names only.
 - Run `gitleaks` in CI and as a pre-commit hook. OAuth client secret for Phase B lives only in the secret store.
 - The channel export tokens (`secrets/`) are owner-only and **never** present in the deployed image.
@@ -261,7 +441,7 @@ Deploy specifics: `fly.toml` with `[http_service] internal_port=8080, force_http
 
 ### Observability (reuse `src/obs/`)
 - Per run: trace id = `job_id`; spans for each stage and each tool call; token counts, USD, latency per stage, queue wait. Persist to the `jobs` row (summary) and to the trace store used by evals so production traces can be sampled into eval cases (with user consent only).
-- Metrics endpoint or structured JSON logs to stdout (Fly log shipping); key dashboards (a notebook or simple SQL views are enough): runs/day, p50/p95 latency per stage, failure rate by reason, $/run, queue wait, rejected uploads by reason, budget-kill events.
+- Structured JSON logs to stdout (Cloud Logging; run records sink to BigQuery, 0b.5; was Fly log shipping); key dashboards (BigQuery SQL views are enough): runs/day, p50/p95 latency per stage, failure rate by reason, $/run, queue wait, rejected uploads by reason, budget-kill events.
 - Alerts (email/Discord webhook): error rate >10% over 15 min, global spend >80%, queue wait p95 >2 min, disk >80%.
 - Sentry free tier for exceptions (scrub request bodies).
 - Resume numbers come from here: p50/p95 end-to-end latency, $/run, injection-test pass rate.
@@ -320,7 +500,7 @@ Strict CSP and security headers (HSTS, `X-Content-Type-Options`, `Referrer-Polic
 1. **On every PR (fast, no secrets, <5 min):** ruff + mypy (api package), `pytest tests/ -m "not slow and not live"` with mocked LLM clients, security unit tests (SSRF, media_guard with tiny generated ffmpeg fixtures, authz cross-user), `pip-audit`, `gitleaks`, Docker build + Trivy scan, Alembic migration check.
 2. **Eval gate on PRs touching `src/tools/`, `src/agent/`, prompts (path filter):** run the offline eval harness on the **dev split** using cached Gemini outputs where possible (cache key = video hash + prompt hash + model) so PR evals cost cents; fail the PR if the headline metric drops more than a tolerance vs `main` (store the baseline `evals/baseline.json` in repo; compare with confidence intervals or a fixed margin, since n=40 is noisy; make the gate a *warning* comment for tiny deltas, a *fail* for large drops). The held-out set only runs manually/nightly with real models, never on PRs, to avoid overfitting through iteration. Secrets for live evals are limited to a protected environment (no fork PRs; `pull_request` not `pull_request_target`).
 3. **Nightly:** live injection suite, held-out eval, cost report.
-4. **CD:** tag -> deploy to Fly after CI green; smoke test `/readyz` plus one canned job.
+4. **CD:** tag -> deploy to Cloud Run via Workload Identity Federation after CI green (0b.6; was Fly); smoke test `/readyz` plus one canned job.
 
 ---
 
@@ -330,8 +510,8 @@ Strict CSP and security headers (HSTS, `X-Content-Type-Options`, `Referrer-Polic
 tests/api/
   test_health.py            readyz/healthz
   test_auth.py              sessions, invite codes, magic link expiry, logout
-  test_uploads.py           size cap mid-stream abort, bad type, wrong extension, duration cap, partial-file cleanup
-  test_jobs_lifecycle.py    enqueue -> claim -> done; retry; visibility timeout; cancel; refund on failure
+  test_uploads.py           signed-URL issuance, size/type caps at issuance, already_uploaded, worker-side hash mismatch (0b.6)
+  test_jobs_lifecycle.py    enqueue -> deliver -> done; duplicate delivery = one result + zero extra model calls; ALREADY_EXISTS -> existing job; 503 -> retry -> resumes at checkpoint; cancel; refund on failure
   test_sse.py               event order, Last-Event-ID resume, fallback poll
   test_rate_limit.py        per-user and per-IP buckets
   test_cost_caps.py         pre-flight reject, RunBudget kill, daily/global ceiling, cache hit costs 0

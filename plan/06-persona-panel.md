@@ -1,4 +1,4 @@
-# Phase 6: `audience_panel` (persona panel), gated by an experiment
+# Phase 6: Audience reaction (`similar_past_shorts`, `category_reactions`; persona panel optional)
 
 **Status:** not started. **Depends on:** phase 1 (demographics, geography, comments), phase 3 (eval dataset,
 harness, metrics, `analyze_video`). **Ships only if** the experiment in section 4 says it beats a single-model
@@ -41,6 +41,105 @@ by the phase-3 model, so the panel's retention score is only reported for compar
 
 Security: comment text is untrusted (could contain injection attempts). It is passed as quoted data in a clearly
 delimited block, truncated, never as instructions; phase 8 adds injection-in-comment fixtures.
+
+## 0b. Revision 2026-11-04: two reaction sources, fixed categories, Gemini writes the reaction (extends section 0)
+
+Decided in [README](README.md) "Revision 2026-11-04". Build Steps 5 (own retrieval), 4 + 7 (pool) and 8 (eval).
+
+### 0b.1 Two sources
+
+| Tool | Source | Matching | Why |
+|---|---|---|---|
+| `similar_past_shorts` | creator's own past Shorts + their comments (`data/channel/`) | nearest neighbours on checklist features (section 0, item 1) | "your audience": the right viewers, but thin (median 8 top-level comments per video) and old |
+| `category_reactions` | rolling 30-day pool of other Brawl Stars channels' Shorts + their comments (`data/pool/`) | same **category** as the draft (0b.3) | fresh (new brawlers, meta, current memes) and high volume, but a different audience |
+
+Both return real comments (usernames and channel ids stripped), theme shares and engagement rates. The plan shows them
+side by side, labelled "your viewers" and "Brawl Stars right now".
+
+### 0b.2 The 30-day pool (Step 7, only if the Step 4 policy read allows it)
+
+- **Channels:** reuse the phase 4 watchlist (`config/watchlist.toml`, ~20 top Brawl Stars channels, hand-picked). One list
+  for hashtags and the pool.
+- **Collection (daily job, `src/pool/collect.py`), official Data API with an API key, never `search.list`, never
+  downloading videos:**
+  1. `playlistItems.list` on each uploads playlist → new video ids from the last 30 days.
+  2. `videos.list` (50 ids per call) → title, description, tags, duration, thumbnail URL, view/like/comment counts.
+     Keep Shorts only (duration ≤ 180 s; verify the cutoff against how YouTube classifies Shorts).
+  3. `commentThreads.list` (`order=relevance`, 100 per call, top-level only) for clips 2-14 days old, since comments
+     need time to accumulate. Refetch once at ~7 days.
+- **Quota estimate (verify unit costs in Step 4):** ~20 channels × ~1 Short/day ≈ 20 new clips/day, ~600 live. About 20
+  `playlistItems` + 1-2 `videos.list` + ~40 `commentThreads` calls per day ≈ **under 100 units/day** of the 10,000.
+- **Storage (`data/pool/`, gitignored):** one row per clip and per comment, each with `fetched_at`. No author names or
+  ids are stored at all (dropped at ingestion, not later). No video files, no thumbnail images stored.
+- **30-day rule:** `src/pool/sweep.py` deletes every row whose `fetched_at` is older than 30 days, unless it was
+  refreshed. It runs at the start of every collection and every server start, and a test asserts nothing older than 30
+  days survives. Traces and eval artifacts store only ids, counts and theme shares for pool data, never comment text.
+
+### 0b.3 Fixed category list (Fredrik finalises; frozen before any tagging)
+
+Draft v0, chosen so a category can be read from **title + description + thumbnail** (that's all we have for pool
+clips) and is useful for "what will people comment":
+
+| Category | Examples |
+|---|---|
+| `funny_fail` | fails, randoms/teamers, trolling, bad luck |
+| `skill_clutch` | clutches, 1vX, outplays, team wipes, trick shots |
+| `quiz_guess` | guess the brawler, "can you spot", viewer challenges |
+| `loot_opening` | Starr Drops, boxes, pulls, unlocks |
+| `new_content` | new brawler, skin, hypercharge, update, leaks |
+| `ranking_tips` | tier lists, "best brawler for", tips, settings |
+| `meme_skit` | memes, edits, text skits, POV |
+| `challenge` | self-imposed challenges ("only using X", "1 trophy vs 50k") |
+| `glitch_bug` | glitches, bugs, broken interactions |
+| `other` | anything else (if > 15% of the pool lands here, the list is revised and re-frozen) |
+
+- **Tagging pool clips (`src/pool/tag.py`):** one cheap Gemini call per new clip (text + thumbnail image, no video),
+  output = one category from the enum + an `uncertain` flag. ~20 calls/day. **Decision for Fredrik:** this doesn't fit in
+  the free tier (20/day, already used by the hook test); recommended: allow the paid key for tagging (well under $1/month at
+  flash-lite rates; verify the price).
+- **Tagging the draft:** the agent picks the category after watching the draft. `category_reactions(category)` takes
+  the category as an enum argument (safe: it can't name a channel, URL or file). The server returns the category's
+  evidence plus the runner-up category's size, so thin categories are visible.
+- **Checking the two tagging routes agree:** on the creator's own Shorts, tag each from metadata only (the pool route) and from
+  the video (the draft route), then report Cohen's kappa. Low agreement means draft and pool categories don't mean the same
+  thing, so revise the definitions before trusting `category_reactions`.
+
+### 0b.4 Who writes the reaction
+
+Gemini (the agent, phase 5 §0.4) writes the predicted comments and the viewer consensus from both sources' evidence,
+citing which past Short or category it rests on. That is arm **R1** in the section 0 eval. The multi-persona panel (arm
+**P**, sections 1-9 below) is now an optional experiment, not on the build path.
+
+### 0b.5 Reaction eval, updated (Step 8)
+
+Arms (section 0) get the two sources as a factor:
+
+| Arm | Evidence | Who predicts |
+|---|---|---|
+| R0-own / R0-pool / R0-both | own neighbours / category pool / both | average of the evidence (no LLM) |
+| R1-own / R1-pool / **R1-both** (the product) | same | Gemini, one call |
+| P (optional) | both | persona panel |
+
+Two test sets, both predicted without seeing the target's comments:
+- **Own held-out Shorts** (hook-test HELDOUT): does it predict *your* audience?
+- **Recent pool clips:** for each of the newest ~100 clips, predict from neighbours that were all published before it
+  (time-ordered, leave-one-out). This set is much larger than the creator's own and tests the fresh-pool route.
+
+Metrics as in section 0 (per-theme AUC / macro-F1, Spearman on relative engagement), paired bootstrap.
+**Ship rule:** generated reactions (R1-both) ship only if they beat R0-both. If they don't, the plan shows the retrieved
+real comments and theme shares only. Pool data in eval artifacts follows the 30-day rule (store scores and ids,
+not comment text).
+
+### 0b.6 Questions for the Step 4 policy read
+
+1. Is storing other channels' public comments for ≤ 30 days (no author data) allowed for this use?
+2. Does pooling several creators' clips and comments into per-category theme shares count as prohibited aggregation
+   or a restricted derived metric?
+3. Can the product show other creators' real comments to a user (attribution rules)?
+4. Are per-category engagement rates (from public view/like/comment counts) allowed, or must the pool use comments
+   only?
+
+If the answer to 1 or 2 is no, `category_reactions` is dropped and the product uses `similar_past_shorts` only.
 
 ## 1. What the tool would do
 

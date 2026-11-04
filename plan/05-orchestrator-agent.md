@@ -1,6 +1,101 @@
-# Phase 5: Orchestrator Agent (Claude tool use)
+# Phase 5 (now build Step 6): Agent, revised to a Gemini MCP client
 
-Status: design, implementation-ready. Depends on phase 3 (`analyze_video`, eval harness, `src/obs/`) and phase 4
+## 0. Revision 2026-11-04: Gemini agent as an MCP client (supersedes conflicting parts below)
+
+Decided in [README](README.md) "Revision 2026-11-04". Claude is no longer in the stack; the agent is Gemini, and every
+tool comes from the project's MCP server (phase 7, build Step 5). The filename is kept so links still work.
+
+### 0.1 What the agent is
+
+`src/agent/` is a small Python program: `python -m src.agent run --video draft.mp4 [--title ...] [--notes ...]`.
+
+1. Starts the MCP server over **stdio** and connects as an MCP client (`mcp` Python SDK `ClientSession`).
+2. Lists the server's tools and turns them into Gemini function declarations.
+3. Uploads the draft to Gemini (Files API) so the agent can **watch** it, then runs the agent loop: Gemini calls MCP
+   tools, code executes them through the MCP session, results go back to Gemini, Gemini writes the publish plan.
+
+Gemini CLI connected to the same MCP server is the **demo** path (no code of ours in the loop). Our script is the
+**tested** path: budgets, tracing, validation and evals only exist there.
+
+**Manual loop, not the SDK's automatic MCP/function calling.** The `google-genai` SDK may be able to take an MCP session
+directly and run tools automatically (verify). We don't use that, for the reasons in 4.1: per-tool timeouts, tracing
+spans, sanitising before results enter history, budgets and the repair turn all need our own loop.
+
+### 0.2 Tools the agent sees (all from the MCP server; schemas live in phase 7)
+
+| Tool | Required? | What it gives the agent |
+|---|---|---|
+| `predict_retention` | **yes** | `hold_resid` prediction + per-feature "why" contributions + the frozen extraction (payoff times, hook fields, ending) with ids for citing. Runs frozen extraction + code features + ridge server-side (README revision point 4) |
+| `similar_past_shorts` | **yes** | k=3-5 most similar own past Shorts: `hold_resid`, engagement rates, top real comments, theme tags (phase 6 §0) |
+| `category_reactions` | yes, once Step 7 ships | matched category from the 30-day pool + real top comments and theme shares for it |
+| `trending_hashtags` | no | phase 4, unchanged |
+| `trending_audio` | no | phase 4, unchanged |
+| `get_video_metrics`, `get_retention_curve` | no | lookups when the agent cites a specific past Short |
+
+Removed: `analyze_video` as an agent tool (it is now the internal extractor behind `predict_retention`),
+`get_channel_baseline` (`hold_resid` is already relative to the channel; the baseline numbers come back inside the
+`predict_retention` result), `audience_panel` (see 0.4).
+
+**Binding the draft (keeps L0 from 11.2).** The model never passes a file path. Tools that need the draft take no
+path argument from the model; the client's adapter injects the run's bound `video_path` before calling the MCP tool. When
+an external client (Gemini CLI) calls the server directly, `video_path` is a real argument and the server validates it
+(phase 7 §9.3).
+
+### 0.3 Where every part of the plan comes from
+
+| Plan section | Source | Who decides |
+|---|---|---|
+| Retention number ("+8 vs your usual") and confidence | `predict_retention` (ridge); interval from cross-validation residuals; confidence from the GATE/HELDOUT result | code |
+| "Why" lines | ridge contributions (coefficient × standardised feature) | code picks the top items, Gemini words them |
+| Hook/pacing feedback with timestamps | Gemini watching the draft, but every timestamp must cite a `predict_retention` extraction item (provenance validator, section 8) | Gemini, validated by code |
+| "Most like" + real comments | `similar_past_shorts`, `category_reactions` | code (retrieval) |
+| Predicted comments + viewer consensus | Gemini, citing the retrieved comments | Gemini; **eval-gated** (0.4) |
+| Hashtags, sound | phase 4 tools; membership-checked | Gemini picks, code checks |
+
+If Step 3's model does not beat the hook-test baseline on GATE, the retention number is `withheld` (same idea as
+the gate in section 8) and the rest of the plan still ships.
+
+### 0.4 Reaction: no separate persona panel by default
+
+Gemini itself writes the predicted comments and consensus from the retrieved evidence. In phase 6's reaction eval this
+is arm **R1** (one LLM with the evidence). It ships only if R1 beats **R0** (just showing the retrieved real comments
+and theme averages). A multi-persona panel (arm P) stays an optional experiment, not part of the agent.
+
+### 0.5 Model, keys and cost
+
+- Model: `gemini-3.8-flash` (free-tier model per AGENTS.md); try a stronger Gemini only if evals show a quality gap.
+- **Key: open decision for Fredrik.** One run is roughly 3-4 agent turns + 1 extraction call inside
+  `predict_retention`, so about 5 requests. Free tier (20/day, shared with 503 retries) means about 4 runs a day:
+  enough to develop with, not enough for evals or real use. The paid key is currently restricted to feature extraction.
+- Budgets (4.5) keep the same shape; "per-run Claude spend" becomes per-run Gemini spend.
+
+### 0.6 Claude-specific parts below that are replaced by Gemini equivalents (verify each at build time)
+
+| Below (Claude) | Gemini replacement | Verify |
+|---|---|---|
+| 2 model strategy, cost table, Fable judge, Haiku screen | 0.5; judge = a different Gemini model or creator ratings (generator and judge must differ); no injection screen model unless the live suite needs one | prices, model ids |
+| 3.1-3.5 tool JSON | MCP tool schemas from phase 7, converted to function declarations | schema features Gemini function declarations accept |
+| 4.1-4.2 Anthropic client, prompt caching, `output_config.format` | `google-genai` client; structured output via response schema on the final turn | whether response schema can be combined with tools in one request |
+| `tool_choice: none` / forced tools unavailable | function-calling mode `NONE` to force the final answer; mode `ANY` is available, so the required-tool check (4.4) can force `predict_retention` + `similar_past_shorts` on turn 1 | mode names and behaviour |
+| Preserved thinking blocks | return Gemini's thought signatures unchanged in history (same append-only rule) | whether the chosen model requires them |
+| Mid-conversation `role: system` nudges | append a fixed-text user turn marked as run control; system instruction stays static | |
+| Server-side refusal fallback | handle safety-blocked finish reasons in code → degraded plan | finish reason names |
+| 8 band + calibration | replaced by 0.3 (ridge number, CV interval, GATE/HELDOUT confidence); provenance validator kept | |
+
+### 0.7 Still applies as written
+
+Principles (1), tool envelope and `<<DATA>>` wrapping (3.6; sanitising now happens inside the MCP server per
+E9, the client wraps again), loop shape and budgets (4.3-4.5), parallel execution (5), system prompt skeleton (6,
+reworded for the new tools), output schema (7, with a reaction section added), provenance validator (8) and
+validation (9), tracing (10, Gemini pricing), injection defense (11), latency targets (12, re-measure), evals (14).
+
+**Injection change:** raw comments (own and other channels', usernames stripped) now reach the agent through
+`similar_past_shorts` and `category_reactions`. Surface E5 widens accordingly: comment text is always wrapped untrusted
+data and gets its own cases in 11.3 (instructions hidden in a comment).
+
+---
+
+Status (below this line, original 2026-10 design): design, implementation-ready. Depends on phase 3 (`analyze_video`, eval harness, `src/obs/`) and phase 4
 (`trending_hashtags`, `trending_audio`). Phase 6 (`audience_panel`) plugs in behind a flag.
 Model IDs, prices and API shapes below were checked against the Claude API reference cached 2026-09-25; re-verify
 prices and the two beta features (server-side fallbacks, mid-conversation system messages) with `client.models.retrieve`

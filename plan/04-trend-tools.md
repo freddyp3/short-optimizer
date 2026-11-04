@@ -9,6 +9,25 @@ and marked **[UNVERIFIED]** inline.
 
 ---
 
+## 0b. Revision 2026-11-04 (Brawl Stars only, MCP first)
+
+Decided in [README](README.md) "Revision 2026-11-04". Changes to this doc are small:
+
+1. **Consumers.** Both tools are MCP tools (phase 7 §0b.1, built in Step 5) called by the Gemini agent (phase 5 §0),
+   not by a Claude orchestrator. Inputs, outputs and policy handling below are unchanged.
+2. **One watchlist for two jobs.** `config/watchlist.toml` (2.2) is also the channel list for the 30-day reaction pool
+   (phase 6 §0b.2). Brawl Stars channels only.
+3. **Hashtags stay live and stored nowhere, for now.** It would be cheap to compute hashtags from the pool's stored
+   titles/descriptions instead of a live pull, but that would reverse this doc's "store nothing" decision. Decision
+   deferred to the Step 4 policy read: if storing other channels' data for the pool is allowed, hashtags *may* read
+   from the pool (same data, one fewer API path); if not, the live pull below is the only path and the pool doesn't exist.
+4. **Step 4 policy read covers this doc too.** Open questions 1-3 and 9 in section 8 are answered in the same pass as
+   phase 6 §0b.6, and the answers are written back into both docs.
+5. **`trending_audio` unchanged.** The optional Gemini audio-style comparison (3.4) uses the agent's model choice and
+   key (phase 5 §0.5).
+
+---
+
 ## 0. Summary of decisions
 
 | Topic | Decision |
