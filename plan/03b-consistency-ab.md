@@ -88,8 +88,9 @@ v3 = v2 word for word, except `timeline`:
    filler (`no change` on windows where something visibly happens) or invented audio.
    **Laziness check** (10 long-band videos, v3 both runs): compare the last third of the windows with the first third.
    v3 is "lazy" if the `no change` share in the last third is ≥ 20 percentage points above the first third, or if
-   more than 1 in 5 of the payoffs v2 found in the last third (same video, either v2 run, matched within 1.0 s) have
-   no matching event in v3's timeline. Lazy triggers the fallback in 4.4 instead of disqualifying v3.
+   more than 1 in 5 of the payoffs v2 found in the last third of the video (t ≥ 2/3 of the duration, either v2 run)
+   have no v3 payoff (either v3 run) within 1.0 s. (Made precise 2026-11-04, before any A/B call: "matching event"
+   = a v3 payoff; a free-text match against the timeline would almost always succeed with fixed windows.) Lazy triggers the fallback in 4.4 instead of disqualifying v3.
 2. **v2 vs v3:** the version with more core features passing their threshold wins. Tie: higher mean of the core
    agreement statistics (κ and ICC values; timestamps scored as the share of videos with |Δt| ≤ 1.0 s), if it leads by
    ≥ 0.05. Otherwise **v2** (incumbent, simpler).

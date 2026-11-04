@@ -1,7 +1,10 @@
 """Tests for extract.py with a fully mocked genai client (no network)."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
+
+import pandas as pd
 
 import pytest
 
@@ -70,9 +73,12 @@ class TestCLI:
     def test_pick_dev_videos_stratified(self):
         vids = extract.pick_dev_videos(10)
         assert len(vids) == 10
-        assert (vids["label"] == "strong").sum() == 5
-        assert (vids["label"] == "weak").sum() == 5
-        assert (vids["split"] == "dev").all()
+        sel = pd.read_csv("data/evals/hook_test/selection.csv").set_index("blind_id")
+        labels = sel.loc[vids["blind_id"], "label"]
+        assert (labels == "strong").sum() == 5
+        assert (labels == "weak").sum() == 5
+        assert (sel.loc[vids["blind_id"], "split"] == "dev").all()
+        assert vids["blind_path"].str.contains("blind/").all()
 
 
 class TestPinning:
@@ -110,3 +116,103 @@ class TestFileDuration:
                             lambda p: {"duration_s": 11.3, "width": 1, "height": 1,
                                        "has_audio": True})
         assert extract.blind_duration(tmp_path / "x.mp4") == 11.3
+
+
+def v3_json(duration):
+    from src.tools.analyze_video.schema import windows
+    d = valid_data(duration)
+    d["timeline"] = [{"start_s": a, "end_s": b, "seen": "x", "heard": "y"}
+                     for a, b in windows(duration)]
+    return json.dumps(d)
+
+
+class TestVersions:
+    def test_v3_uses_v3_schema_and_rendered_windows(self, tmp_path, blind_file):
+        from src.tools.analyze_video.schema import VideoFeaturesV3
+        fake = FakeClient([fake_resp(v3_json(21.0))])
+        t = GeminiFeatureExtractor(client=fake, version="v3",
+                                   uploads_path=tmp_path / "u.json", sleep=lambda s: 0)
+        from src.tools.analyze_video.schema import render_prompt
+        rec = t.analyze("vAAA111", blind_file, render_prompt(
+            "windows: {windows} ({n_windows})", 21.0), 21.0, prompt_version="v3")
+        assert rec["status"] == "ok" and rec["schema_version"] == "v3"
+        assert fake.models.calls[0]["config"].response_schema is VideoFeaturesV3
+        assert "0.0-1.0" in fake.models.calls[0]["contents"][1]
+
+
+class RecordingExtractor:
+    """Stands in for GeminiFeatureExtractor in main(): records call order, no network."""
+    instances = []
+
+    def __init__(self, **kw):
+        self.calls = []
+        RecordingExtractor.instances.append(self)
+
+    def analyze(self, blind_id, path, prompt_text, duration_s, **kw):
+        self.calls.append(blind_id)
+        return {"blind_id": blind_id, "status": "ok", "result": {"payoffs": []},
+                "quality_flags": [], "usage": {"total_tokens": 1},
+                "cost_usd_paid_equiv": 0.01, "latency_s": 0.1}
+
+
+@pytest.fixture
+def fake_train(tmp_path, monkeypatch):
+    """A 4-row consistency selection + blind files + stubbed probe/extractor."""
+    vids = pd.DataFrame({
+        "video_id": [f"vid{i}" for i in range(4)],
+        "blind_id": [f"vb{i:07x}" for i in range(4)],
+        "band": ["short"] * 4,
+        "duration_s_export": [10.0, 11.0, 12.0, 13.0],
+        "blind_path": [str(tmp_path / f"b{i}.mp4") for i in range(4)],
+    })
+    for bp in vids["blind_path"]:
+        Path(bp).write_bytes(b"fake")
+    monkeypatch.setattr(extract, "CONSISTENCY_CSV", tmp_path / "sel.csv")
+    vids.to_csv(tmp_path / "sel.csv", index=False)
+    monkeypatch.setattr(extract, "blind_duration", lambda p: 10.0)
+    monkeypatch.setattr(extract, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(extract, "GeminiFeatureExtractor", RecordingExtractor)
+    RecordingExtractor.instances.clear()
+    return vids
+
+
+class TestTrainRunner:
+    def test_train_reads_selection(self, fake_train):
+        vids = extract.pick_train_videos()
+        assert len(vids) == 4 and set(vids.columns) == {
+            "video_id", "blind_id", "band", "duration_s_export", "blind_path"}
+
+    def test_runs2_writes_r1_r2(self, fake_train, tmp_path):
+        rc = extract.main(["--split", "train", "--runs", "2", "--run-id", "t1",
+                           "--budget-usd", "99"])
+        assert rc == 0
+        rd = tmp_path / "raw" / "t1"
+        assert len(list(rd.glob("*__r1.json"))) == 4
+        assert len(list(rd.glob("*__r2.json"))) == 4
+        rec = json.loads((rd / "vb0000000__r1.json").read_text())
+        assert rec["run_k"] == 1 and rec["band"] == "short"
+
+    def test_resume_skips(self, fake_train, tmp_path):
+        extract.main(["--split", "train", "--runs", "1", "--run-id", "t2",
+                      "--budget-usd", "99"])
+        n_calls = len(RecordingExtractor.instances[-1].calls)
+        extract.main(["--split", "train", "--runs", "1", "--run-id", "t2",
+                      "--budget-usd", "99"])
+        assert len(RecordingExtractor.instances[-1].calls) == 0  # all skipped
+        assert n_calls == 4
+
+    def test_order_shuffled_per_run(self, fake_train):
+        extract.main(["--split", "train", "--runs", "2", "--run-id", "t3",
+                      "--budget-usd", "99"])
+        calls = RecordingExtractor.instances[-1].calls
+        assert calls[:4] != calls[4:] or len(set(calls)) == 4  # orders differ or all unique
+
+    def test_budget_abort(self, fake_train):
+        rc = extract.main(["--split", "train", "--runs", "1", "--run-id", "t4",
+                           "--budget-usd", "0.0"])
+        assert rc == 1
+
+    @pytest.mark.parametrize("split", ["gate", "heldout"])
+    def test_eval_splits_rejected(self, split):
+        with pytest.raises(SystemExit):
+            extract.main(["--split", split])

@@ -2,7 +2,8 @@
 
 import pytest
 
-from src.tools.analyze_video.schema import validate_features
+from src.tools.analyze_video.schema import (
+    VideoFeaturesV3, render_prompt, validate_features, windows)
 
 DURATION = 20.0
 
@@ -206,3 +207,75 @@ class TestSDKSchema:
         assert order[0] == "timeline" and order[1] == "payoffs"
         assert order[-2:] == ["uncertain_fields", "notes"]
         assert schema.additional_properties is None
+
+
+class TestWindows:
+    def test_windows_11_3(self):
+        w = windows(11.3)
+        assert len(w) == 12 and w[-1] == (11.0, 11.3)
+
+    def test_windows_60_03(self):
+        w = windows(60.03)
+        assert len(w) == 60 and w[-1] == (59.0, 60.0)
+
+    def test_windows_8_04(self):
+        assert len(windows(8.04)) == 8
+
+
+class TestRenderPrompt:
+    def test_v3_placeholders(self):
+        t = "dur {duration_s:.1f}, {n_windows} windows: {windows}"
+        out = render_prompt(t, 2.5)
+        assert "dur 2.5, 3 windows: 0.0-1.0, 1.0-2.0, 2.0-2.5" in out
+
+    def test_v2_text_unchanged(self):
+        t = "The video is {duration_s:.1f} seconds long."
+        assert render_prompt(t, 12.3) == t.format(duration_s=12.3)
+
+
+def v3_data(duration=DURATION):
+    d = valid_data(duration)
+    d["timeline"] = [{"start_s": a, "end_s": b, "seen": "x", "heard": "y"}
+                     for a, b in windows(duration)]
+    return d
+
+
+class TestV3Validate:
+    def test_valid_v3(self):
+        f, reason, flags = validate_features(v3_data(), DURATION, "v3")
+        assert reason is None
+
+    def test_missing_entry_invalid(self):
+        d = v3_data()
+        d["timeline"] = d["timeline"][:-1]
+        f, reason, flags = validate_features(d, DURATION, "v3")
+        assert f is None and "timeline" in reason
+
+    def test_shifted_bound_invalid(self):
+        d = v3_data()
+        d["timeline"][3]["start_s"] = 3.2   # expected 3.0, > 0.05 off
+        f, reason, flags = validate_features(d, DURATION, "v3")
+        assert f is None and "timeline[3]" in reason
+
+    def test_extra_key_in_entry_invalid(self):
+        d = v3_data()
+        d["timeline"][0]["bogus"] = 1
+        f, reason, flags = validate_features(d, DURATION, "v3")
+        assert f is None and "timeline.bogus" in reason
+
+    def test_timeline_string_invalid(self):
+        d = v3_data()
+        d["timeline"] = "free text like v2"
+        f, reason, flags = validate_features(d, DURATION, "v3")
+        assert f is None and reason.startswith("schema:")
+
+    def test_v2_body_still_validates_as_v2(self):
+        f, reason, flags = validate_features(valid_data(), DURATION, "v2")
+        assert reason is None
+
+    def test_v3_sdk_schema_ordering(self):
+        from google.genai import Client, _transformers as t
+        schema = t.t_schema(Client(api_key="x"), VideoFeaturesV3)
+        assert schema.property_ordering[:2] == ["timeline", "payoffs"]
+        assert schema.properties["timeline"].items.property_ordering == [
+            "start_s", "end_s", "seen", "heard"]
