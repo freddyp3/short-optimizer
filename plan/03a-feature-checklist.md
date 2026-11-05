@@ -1,6 +1,9 @@
 # Phase 3a: Feature checklist for `analyze_video` (feature extraction)
 
-Status: **draft v1 (2026-11-03, after feature review), not frozen.** Freeze after the consistency check (section 6)
+Status: **draft v1 (2026-11-03, after feature review), not frozen. Consistency gate done 2026-11-04 with prompt v2
+(plan/03b section 6: core changes in the M1 row; full-model drops `rewatch_trigger`, `premise_legible_nonplayer`,
+`info_new_per_5s`, `audio_visual_sync`, `beat_before_main_payoff`, `twist`). Remaining before freeze: prevalence rule
+(6.2b) on the full training-pool extraction.** Freeze after the consistency check (section 6)
 and before any model is trained. Implements phase 3 section 0b step 1 ("fixed checklist out"). Every model-facing
 field is an enum, bool or number; free text is scratchpad only.
 
@@ -221,7 +224,7 @@ strong/weak classifier: GATE's 26/40 rule is read off the ridge prediction by ra
 | Model | Features | Parameters | Question it answers |
 |---|---|---|---|
 | M0 `theme_only` | H1 | 1 | how far does "make more of what worked" get you |
-| **M1 `core_mechanics`** | B3 `t_premise_clear_s`, C1 `payoff_count`, C1 `main_payoff_frac`, C1 `tail_after_last_payoff_s`, C6 `dead_time_s`, C2 `arc_ord`, D2 `loop_seam`, D2 `loop_seam × is_short`, G2 `cuts_per_s` | 9 | do editing/structure mechanisms predict hold, independent of what the video is about |
+| **M1 `core_mechanics`** | B3 `t_premise_clear_s`, C1 `payoff_count` (all payoffs, `payoff_count_all` in derive.py), C1 `main_payoff_frac`, C1 `tail_after_last_payoff_s` (`tail_all`, raw times), C6 `dead_time_s`, C2 `arc_ord`, G6 `first_last_dhash_dist` (substitute for D2 `loop_seam`, failed the gate), G6 × `is_short`, G2 `cuts_per_s`. Updated 2026-11-04 from the consistency gate, plan/03b section 6 | 9 | do editing/structure mechanisms predict hold, independent of what the video is about |
 | **M2 `core`** | M1 + H1 | 10 | the product model: mechanisms plus the channel's own history |
 | M3 `full` | everything in groups A-H marked full or core, plus `duration_s`, `era` | ≈ 50 | exploratory; which extra features deserve a place in the next core |
 | M4 `code_only` | group G | ≈ 14 | how much is visible with no LLM at all |

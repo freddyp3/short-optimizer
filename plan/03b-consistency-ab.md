@@ -1,6 +1,6 @@
 # Phase 3b: Code-layer changes, prompt v3, and the v2-vs-v3 consistency A/B
 
-Status: **draft (2026-11-04), not started.** Amends plan/03a section 6 (freezing procedure). Everything here is
+Status: **done (2026-11-04): v2 wins; results in section 6.** Amends plan/03a section 6 (freezing procedure). Everything here is
 decided before any extraction on the training pool, and nothing in it ever looks at `hold_resid`.
 
 ## 0. Why
@@ -84,6 +84,10 @@ v3 = v2 word for word, except `timeline`:
 `loop_seam`. (`cuts_per_s` is code, always identical.) Thresholds from 03a 6.2: κ ≥ 0.6, ICC ≥ 0.7, timestamps median
 |Δt| ≤ 1.0 s.
 
+**Correction (2026-11-04, after the runs):** the committed scoring script (`ab_score.py`, commit fa305e9) scores the
+main payoff as the timestamp `t_main_payoff_s` with the timestamp rule, not `main_payoff_frac` with ICC as listed
+above. The script is what ran; section 6 reports the decision both ways (it is the same).
+
 ### 4.3 Decisions, in this order
 1. **Validity guard for v3** (checked first; v3 loses if any fails): invalid rate after retry ≤ 10 %; mean clear payoff
    count within ±25 % of v2's; a read of 5 videos' v3 timelines (one per duration band + 2 longest) finds no systematic
@@ -123,3 +127,45 @@ results.
 7. Scoring script (section 4) written and committed before any training-pool call.
 8. Dry run (cost estimate), then the four runs.
 9. Report: the 4.3 decisions with CIs, then freeze (03a 6.3) and the full extraction (about $8, asked first).
+
+## 6. Results (2026-11-04)
+
+Runs: v2 `20261104T224114Z_fa305e9` ($1.90), v3 `20261104T231214Z_fa305e9` ($2.27; resumed after the maxItems fix,
+commit 0d6b26d). 120/120 records valid, `model_version` `gemini-3.8-flash` throughout. Report:
+`data/features/gemini/ab_report/20261104T224114Z_fa305e9__20261104T231214Z_fa305e9.{md,json}`.
+
+**v3 guard and laziness:** passed. Invalid rate 0 %; mean clear payoffs 1.32 vs 1.32; manual read of v01452c0c,
+vbbbcc779, vc320954c, vda204d7d, vdae4c4e0 (run 1) found careful entries to the last window, `no change` only on
+genuinely static stretches, no invented audio (read = yes). `no change` share first third 0.0 %, last third 0.6 %;
+25/25 late v2 payoffs matched by v3.
+
+**Core agreement (run 1 vs run 2, 30 videos; 95 % bootstrap CIs in the report):**
+
+| Feature | v2 | v3 |
+|---|---|---|
+| `t_premise_clear_s` (share ≤ 1 s) | 0.90 pass | 0.87 pass |
+| `payoff_count`, clear (ICC) | 0.29 fail | 0.55 fail |
+| `t_main_payoff_s` (share ≤ 1 s) | 0.93 pass | 0.97 pass |
+| `tail_all` (ICC) | 0.99 pass | 1.00 pass |
+| `dead_time_s` (ICC) | 0.77 pass (CI 0.15-0.99) | 0.46 fail |
+| `arc_ord` (weighted κ) | 0.78 pass | 0.73 pass |
+| `loop_seam` (weighted κ) | 0.53 fail | 0.59 fail |
+
+**Decision: v2.** As committed (main payoff by timestamp): v2 5 passes vs v3 4. As the 4.2 text read
+(`main_payoff_frac` by ICC): 4 vs 4, mean lead of v3 = 0.0499 < 0.05, so the incumbent v2 wins. v2's
+`main_payoff_frac` ICC (0.56) is driven by one video (`v2a54836c`, main payoff 20.0 s vs 2.2 s); without it, 0.99.
+The A/B found no meaningful difference between the versions; v2 is the simpler and 17 % cheaper one.
+
+**Variants (4.3 step 3, v2):** snapping changes nothing (share 0.93 raw and snapped) → raw. `tail_all` ICC 0.99 vs
+`tail_clear` 0.72 → `tail_all`.
+
+**Gate (4.3 step 4, v2):**
+- Core keep: `t_premise_clear_s`, `t_main_payoff_s` / `main_payoff_frac`, `tail_all`, `dead_time_s` (fragile: wide CI),
+  `arc_ord`. Substitute: `loop_seam` → G6 `first_last_dhash_dist` (also in the `× is_short` interaction).
+- `payoff_count` (clear, ICC 0.29) fails. **Amendment (2026-11-04, creator's call, outcome-blind):** the core uses
+  `payoff_count_all` instead (ICC 0.91 in v2, 0.94 in v3), i.e. back to the original 03a C1 definition. Chosen by
+  run-to-run agreement only, like the tail variant; `hold_resid` was not looked at. The clear count stays computed for
+  reporting. The weight 1 vs 2 call is what is unstable; the number of payoffs Gemini lists is not.
+- Full model drops: `rewatch_trigger` (κ 0.36), `premise_legible_nonplayer` (0.32), `info_new_per_5s` (0.45),
+  `audio_visual_sync` (0.55), `beat_before_main_payoff` (0.57), `twist` (0.60, just under). All other full fields pass.
+- Next: prevalence rule (03a 6.2b) on the training pool after the full extraction, then freeze (03a 6.3).
