@@ -100,6 +100,17 @@ def pick_train_videos() -> pd.DataFrame:
     return df[["video_id", "blind_id", "band", "duration_s_export", "blind_path"]].copy()
 
 
+TRAIN_CSV = OUT_DIR / "train_selection.csv"
+
+
+def pick_train_all_videos() -> pd.DataFrame:
+    """train_selection.csv rows with source == 'new' (the 30 A/B rows reuse their v2 run)."""
+    df = pd.read_csv(TRAIN_CSV)
+    df = df[df["source"] == "new"].copy()
+    df["band"] = None
+    return df[["video_id", "blind_id", "band", "duration_s_export", "blind_path"]]
+
+
 def summarize(run_dir: Path) -> float:
     """Per-video summary table + per-run invalid counts; returns total cost."""
     recs = sorted((json.loads(p.read_text()) for p in sorted(run_dir.glob("*__r*.json"))),
@@ -132,8 +143,9 @@ def summarize(run_dir: Path) -> float:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--split", required=True, choices=["dev", "train"],
-                   help="dev: stratified hook-test dev pick; train: the 30 consistency videos")
+    p.add_argument("--split", required=True, choices=["dev", "train", "train_all"],
+                   help="dev: stratified hook-test dev pick; train: the 30 consistency "
+                        "videos; train_all: the other 95 train rows (ab30 skipped)")
     p.add_argument("--n", type=int, default=10, help="dev only; train uses all 30")
     p.add_argument("--prompt-version", default=PROMPT_VERSION,
                    choices=sorted(SCHEMAS), help="prompt + schema version")
@@ -154,7 +166,9 @@ def main(argv=None) -> int:
     prompt_file = PROMPTS_DIR / f"{args.prompt_version}.md"
     template = prompt_file.read_text()
     prompt_sha = sha256_file(prompt_file)
-    vids = pick_train_videos() if args.split == "train" else pick_dev_videos(args.n)
+    vids = (pick_train_videos() if args.split == "train"
+            else pick_train_all_videos() if args.split == "train_all"
+            else pick_dev_videos(args.n))
 
     run_id = args.run_id or default_run_id()
     run_dir = RAW_DIR / run_id

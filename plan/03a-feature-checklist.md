@@ -3,7 +3,21 @@
 Status: **draft v1 (2026-11-03, after feature review), not frozen. Consistency gate done 2026-11-04 with prompt v2
 (plan/03b section 6: core changes in the M1 row; full-model drops `rewatch_trigger`, `premise_legible_nonplayer`,
 `info_new_per_5s`, `audio_visual_sync`, `beat_before_main_payoff`, `twist`). Remaining before freeze: prevalence rule
-(6.2b) on the full training-pool extraction.** Freeze after the consistency check (section 6)
+(6.2b) on the full training-pool extraction.**
+
+**Prevalence rule applied 2026-11-05** (`src/tools/analyze_video/prevalence.py`, n = 125 train videos, v2 run
+`20261105T000441Z_94ce0da` + A/B run 1; result in `data/features/prevalence.json`). Full model only; the core is
+untouched (all numeric).
+- Dropped fields: `resolution` (116/125 "resolved"); booleans `premise_legible_muted` (120 true),
+  `main_payoff_legible_muted` (123), `audio_carries_payoff` (4), `result_screen_shown` (9), `no_payoff` (1),
+  `group_live` (9), `no_premise` (8), `unresolved` (0), `relatable_any` (123), `open_first_frame_black` (8).
+- Kept booleans: `big_number_on_screen` (32), `low_health_visible` (35), `opening_dead` (17), `dead_ending` (39).
+- Nominal levels kept (rare levels merged into `other`): `format_macro` edit / gameplay_clip / loot_opening / other;
+  `voice` meme_voice_clip / none / other; `text_role` label_only / narrative / none; `opening_frame` irl_setup /
+  menu_or_lobby / mid_action / other; `premise_type` explicit_question_or_tease / implicit_situation / other;
+  `ending` (tail-resolved) cut_on_payoff / long_tail / short_tail (the 5 semantic endings are too rare to keep);
+  `audio_bed` live_voices / meme_sound / mixed / music; `primary_appeal` humor / skill_hype / suspense_luck / other;
+  `relatability` in_group_reference / shared_player_experience. Freeze after the consistency check (section 6)
 and before any model is trained. Implements phase 3 section 0b step 1 ("fixed checklist out"). Every model-facing
 field is an enum, bool or number; free text is scratchpad only.
 

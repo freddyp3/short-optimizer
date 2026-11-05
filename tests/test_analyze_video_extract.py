@@ -216,3 +216,24 @@ class TestTrainRunner:
     def test_eval_splits_rejected(self, split):
         with pytest.raises(SystemExit):
             extract.main(["--split", split])
+
+
+class TestTrainAll:
+    def test_reads_only_new_rows(self, tmp_path, monkeypatch):
+        pd.DataFrame({
+            "video_id": ["a", "b", "c"],
+            "blind_id": ["vaaa", "vbbb", "vccc"],
+            "duration_s_export": [10.0] * 3,
+            "duration_s_file": [9.9] * 3,
+            "blind_path": ["x/a.mp4"] * 3,
+            "source": ["ab30", "new", "new"],
+        }).to_csv(tmp_path / "ts.csv", index=False)
+        monkeypatch.setattr(extract, "TRAIN_CSV", tmp_path / "ts.csv")
+        vids = extract.pick_train_all_videos()
+        assert vids["video_id"].tolist() == ["b", "c"]
+        assert "ab30" not in vids["video_id"].tolist() if True else False
+
+    def test_gate_heldout_still_impossible(self):
+        for s in ("gate", "heldout"):
+            with pytest.raises(SystemExit):
+                extract.main(["--split", s])

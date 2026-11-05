@@ -92,11 +92,77 @@ def leaked_tags(tags: dict) -> dict:
     return {k: v for k, v in tags.items() if k.lower() in LEAKY_TAGS}
 
 
+BLIND_SEED_ALL = 2340
+TRAIN_CSV = Path("data/features/gemini/train_selection.csv")
+
+
+def build_train_selection(workers: int = 2) -> int:
+    """Full train pool: keep the 30 A/B rows, blind the other 95 (seed 2340)."""
+    df = load_train_safe()
+    ab = pd.read_csv(OUT_CSV)
+    keep = ab[["video_id", "blind_id", "duration_s_export",
+               "duration_s_file", "blind_path"]].assign(source="ab30")
+    rest = df[~df["video_id"].isin(keep["video_id"])]
+    bids = blind_ids(rest["video_id"].tolist(), seed=BLIND_SEED_ALL)
+    hook = pd.read_csv(C.SELECTION_CSV_PATH)
+    check_blind_collisions(bids, set(ab["blind_id"]) | set(hook["blind_id"]))
+
+    jobs = [(bids[r.video_id], VIDEO_DIR / f"{r.video_id}.mp4",
+             BLIND_DIR / f"{bids[r.video_id]}.mp4") for r in rest.itertuples()]
+    missing = [s for _, s, _ in jobs if not s.exists()]
+    if missing:
+        log.error("%d source videos missing", len(missing))
+        return 1
+    # rebuild any blind file whose id was remapped since a previous selection file
+    prev_map = {}
+    if TRAIN_CSV.exists():
+        prev = pd.read_csv(TRAIN_CSV)
+        prev_map = dict(zip(prev["blind_id"], prev["video_id"]))
+    for bid, src, dst in jobs:
+        if dst.exists() and prev_map.get(bid) not in (None, src.stem):
+            dst.unlink()
+    with ThreadPoolExecutor(max_workers=min(workers, 2)) as ex:
+        list(ex.map(lambda j: blind_video(j[1], j[2]), jobs))
+
+    leaky, durations = [], {}
+    for bid, _, dst in jobs:
+        if (leaked := leaked_tags(format_tags(dst))):
+            leaky.append((bid, leaked))
+        durations[bid] = probe(dst)["duration_s"]
+    if leaky:
+        log.error("metadata survived blinding: %s", leaky)
+        return 1
+
+    new = pd.DataFrame({
+        "video_id": rest["video_id"],
+        "blind_id": rest["video_id"].map(bids),
+        "duration_s_export": rest["duration_seconds"],
+        "duration_s_file": rest["video_id"].map(lambda v: durations[bids[v]]),
+        "blind_path": rest["video_id"].map(lambda v: str(BLIND_DIR / f"{bids[v]}.mp4")),
+        "source": "new",
+    })
+    out = pd.concat([keep, new], ignore_index=True)
+    out.to_csv(TRAIN_CSV, index=False)
+    log.info("wrote %s: %d ab30 + %d new = %d", TRAIN_CSV, len(keep), len(new), len(out))
+
+    blind_videos = [(r.blind_id, "train", Path(r.blind_path), r.duration_s_file)
+                    for r in new.itertuples()]
+    sheets = contact_sheets(sorted(blind_videos), FRAMES_DIR, FRAMES_DIR / "_scratch")
+    for s in sheets:
+        log.info("contact sheet: %s", s)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--all", action="store_true", dest="all_train",
+                   help="full train pool: keep the 30 A/B rows, blind the other 95")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.all_train:
+        return build_train_selection(workers=args.workers)
 
     n_before = len(train_rows(exclude_duplicates=False)[SAFE_COLS])
     df = load_train_safe()
