@@ -1,6 +1,11 @@
 # Phase 3a: Feature checklist for `analyze_video` (feature extraction)
 
-Status: **draft v1 (2026-11-03, after feature review), not frozen. Consistency gate done 2026-11-04 with prompt v2
+Status: **FROZEN 2026-11-05 (03a 6.3): prompt `src/tools/analyze_video/prompts/v2.md`, schema `VideoFeatures` in
+`schema.py`, code derivation `derive.py`, and this document as amended below. Marker file
+`src/tools/analyze_video/FROZEN`. The accuracy check (6.4) is postponed by the creator's call (2026-11-05), not
+dropped; any result from the model is reported as "extractor accuracy not yet checked against hand labels".**
+
+History: draft v1 (2026-11-03, after feature review). Consistency gate done 2026-11-04 with prompt v2
 (plan/03b section 6: core changes in the M1 row; full-model drops `rewatch_trigger`, `premise_legible_nonplayer`,
 `info_new_per_5s`, `audio_visual_sync`, `beat_before_main_payoff`, `twist`). Remaining before freeze: prevalence rule
 (6.2b) on the full training-pool extraction.**
