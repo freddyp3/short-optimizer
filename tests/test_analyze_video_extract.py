@@ -237,3 +237,65 @@ class TestTrainAll:
         for s in ("gate", "heldout"):
             with pytest.raises(SystemExit):
                 extract.main(["--split", s])
+
+
+class TestEvalSplit:
+    @pytest.fixture
+    def eval_env(self, tmp_path, monkeypatch):
+        """Fake selection.csv, blind files, and a marker under tmp_path."""
+        sel = pd.DataFrame({
+            "video_id": ["d1", "g1", "h1"],
+            "split": ["dev", "gate", "heldout"],
+            "label": ["strong"] * 3,
+            "blind_id": ["vd001", "vg001", "vh001"],
+            "duration_seconds": [10.0] * 3,
+        })
+        sel_csv = tmp_path / "selection.csv"
+        sel.to_csv(sel_csv, index=False)
+        blind = tmp_path / "blind"
+        blind.mkdir()
+        for b in sel["blind_id"]:
+            (blind / f"{b}.mp4").write_bytes(b"fake")
+        marker = tmp_path / "FROZEN"
+        monkeypatch.setattr(extract, "FROZEN_MARKER", marker)
+        monkeypatch.setattr(extract, "C", __import__(
+            "types").SimpleNamespace(**{**vars(extract.C),
+                                       "SELECTION_CSV_PATH": sel_csv,
+                                       "BLIND_DIR": blind}))
+        monkeypatch.setattr(extract, "blind_duration", lambda p: 10.0)
+        monkeypatch.setattr(extract, "RAW_DIR", tmp_path / "raw")
+        monkeypatch.setattr(extract, "GeminiFeatureExtractor", RecordingExtractor)
+        RecordingExtractor.instances.clear()
+        return marker
+
+    def test_refuses_without_marker(self, eval_env):
+        eval_env.unlink(missing_ok=True)
+        with pytest.raises(SystemExit, match="frozen marker"):
+            extract.main(["--split", "eval", "--dry-run"])
+
+    def test_refuses_on_version_mismatch(self, eval_env):
+        eval_env.write_text("prompt_version=v0\nprompt_sha256=x\n")
+        with pytest.raises(SystemExit, match="prompt_version"):
+            extract.main(["--split", "eval", "--prompt-version", "v2", "--dry-run"])
+
+    def test_refuses_on_hash_mismatch(self, eval_env):
+        eval_env.write_text("prompt_version=v2\nprompt_sha256=deadbeef\n")
+        with pytest.raises(SystemExit, match="sha256"):
+            extract.main(["--split", "eval", "--prompt-version", "v2", "--dry-run"])
+
+    def test_runs_with_matching_marker(self, eval_env, capsys):
+        prompt = Path("src/tools/analyze_video/prompts/v2.md")
+        from src.tools.analyze_video.extract import sha256_file
+        eval_env.write_text(
+            f"prompt_version=v2\nprompt_sha256={sha256_file(prompt)}\n")
+        rc = extract.main(["--split", "eval", "--prompt-version", "v2",
+                           "--run-id", "t_eval", "--budget-usd", "9"])
+        assert rc == 0
+        rd = eval_env.parent / "raw" / "t_eval"
+        recs = [json.loads(p.read_text()) for p in rd.glob("*__r1.json")]
+        assert {r["split"] for r in recs} == {"dev", "gate", "heldout"}
+        # gate/heldout per-video lines are hidden in the summary
+        out = capsys.readouterr().out
+        assert "vg001" not in out and "vh001" not in out
+        assert "vd001" in out
+        assert "gate: 1 ok" in out and "heldout: 1 ok" in out

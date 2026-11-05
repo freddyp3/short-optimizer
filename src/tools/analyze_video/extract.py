@@ -111,23 +111,66 @@ def pick_train_all_videos() -> pd.DataFrame:
     return df[["video_id", "blind_id", "band", "duration_s_export", "blind_path"]]
 
 
+FROZEN_MARKER = Path(__file__).parent / "FROZEN"
+
+
+def check_frozen(version: str, prompt_file: Path) -> None:
+    """--split eval may only run on the frozen checklist (plan/03 0b step 5)."""
+    if not FROZEN_MARKER.exists():
+        raise SystemExit(f"--split eval requires the frozen marker {FROZEN_MARKER}")
+    kv = dict(l.split("=", 1) for l in FROZEN_MARKER.read_text().splitlines()
+              if "=" in l)
+    if kv.get("prompt_version") != version:
+        raise SystemExit(f"frozen marker is prompt_version={kv.get('prompt_version')}, "
+                         f"--prompt-version is {version}")
+    sha = sha256_file(prompt_file)
+    if kv.get("prompt_sha256") != sha:
+        raise SystemExit(f"{prompt_file} sha256 does not match the frozen marker")
+
+
+def pick_eval_videos() -> pd.DataFrame:
+    """All 110 hook-test selection rows; records keep their dev/gate/heldout split."""
+    sel = pd.read_csv(C.SELECTION_CSV_PATH)
+    df = sel[["video_id", "blind_id", "split", "duration_seconds"]].copy()
+    df = df.rename(columns={"split": "eval_split"})
+    df["band"] = None
+    df["duration_s_export"] = df["duration_seconds"].astype(float)
+    df["blind_path"] = df["blind_id"].map(lambda b: str(C.BLIND_DIR / f"{b}.mp4"))
+    return df[["video_id", "blind_id", "band", "eval_split",
+               "duration_s_export", "blind_path"]]
+
+
 def summarize(run_dir: Path) -> float:
-    """Per-video summary table + per-run invalid counts; returns total cost."""
+    """Per-video summary for dev rows; gate/heldout get aggregate counts only
+    (nobody looks at them per video before the model is frozen)."""
     recs = sorted((json.loads(p.read_text()) for p in sorted(run_dir.glob("*__r*.json"))),
                   key=lambda r: (r.get("run_k", 1), r["blind_id"]))
     total = 0.0
+    shown = [r for r in recs if r.get("split") not in ("gate", "heldout")]
+    hidden = [r for r in recs if r.get("split") in ("gate", "heldout")]
     print(f"\n{'blind_id':<11} {'k':<2} {'status':<8} {'invalid_reason':<28} "
           f"{'quality_flags':<24} {'uncertain':<20} {'po':<3} {'cost':>7} {'lat_s':>6}")
-    for r in recs:
+    for r in shown:
         res = r.get("result") or {}
         cost = r.get("cost_usd_paid_equiv", 0.0)
-        total += cost
         print(f"{r['blind_id']:<11} {r.get('run_k', 1):<2} {r['status']:<8} "
               f"{str(r.get('invalid_reason')):<28} "
               f"{','.join(r.get('quality_flags') or []):<24} "
               f"{','.join(res.get('uncertain_fields') or []):<20} "
               f"{len(res.get('payoffs') or []):<3} "
               f"{cost:>7.4f} {r.get('latency_s', 0):>6.1f}")
+    total = sum(r.get("cost_usd_paid_equiv", 0.0) for r in recs)
+    for split in ("gate", "heldout"):
+        rows = [r for r in hidden if r.get("split") == split]
+        if not rows:
+            continue
+        n_inv = sum(1 for r in rows if r["status"] == "invalid")
+        reasons = {}
+        for r in rows:
+            if r["status"] == "invalid":
+                reasons[r.get("invalid_reason")] = reasons.get(r.get("invalid_reason"), 0) + 1
+        print(f"{split}: {len(rows) - n_inv} ok, {n_inv} invalid / {len(rows)}"
+              + (f"  reasons={reasons}" if reasons else ""))
     runs = {}
     for r in recs:
         k = r.get("run_k", 1)
@@ -143,7 +186,7 @@ def summarize(run_dir: Path) -> float:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--split", required=True, choices=["dev", "train", "train_all"],
+    p.add_argument("--split", required=True, choices=["dev", "train", "train_all", "eval"],
                    help="dev: stratified hook-test dev pick; train: the 30 consistency "
                         "videos; train_all: the other 95 train rows (ab30 skipped)")
     p.add_argument("--n", type=int, default=10, help="dev only; train uses all 30")
@@ -168,7 +211,10 @@ def main(argv=None) -> int:
     prompt_sha = sha256_file(prompt_file)
     vids = (pick_train_videos() if args.split == "train"
             else pick_train_all_videos() if args.split == "train_all"
+            else pick_eval_videos() if args.split == "eval"
             else pick_dev_videos(args.n))
+    if args.split == "eval":
+        check_frozen(args.prompt_version, prompt_file)
 
     run_id = args.run_id or default_run_id()
     run_dir = RAW_DIR / run_id
@@ -224,7 +270,8 @@ def main(argv=None) -> int:
                     render_prompt(template, dur), dur,
                     fps=args.fps, media_resolution=args.resolution,
                     prompt_version=args.prompt_version, prompt_sha256=prompt_sha)
-                rec.update({"run_id": run_id, "run_k": k, "split": args.split,
+                rec.update({"run_id": run_id, "run_k": k,
+                            "split": v["eval_split"] if "eval_split" in v else args.split,
                             "video_id": v["video_id"], "band": v["band"],
                             "duration_s_file": dur,
                             "duration_s_export": float(v["duration_s_export"])})
