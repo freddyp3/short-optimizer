@@ -225,6 +225,9 @@ journal/
 claude.md
 AGENTS.md
 
+# plan docs (local only, never committed)
+plan/
+
 # channel_export OAuth secrets
 secrets/
 client_secret*.json
