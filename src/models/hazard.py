@@ -4,6 +4,22 @@ One row per video per 1 % of runtime; target = share of current viewers lost in 
 
     ./venv/bin/python -m src.models.hazard            # CV table
     ./venv/bin/python -m src.models.hazard --perm     # plus the permutation tests (slow for the trees)
+
+Why: 145 videos become 14,355 rows, and the payoff timeline Gemini extracted can be used second by second.
+Folds are over videos, so a video's seconds never sit on both sides of a split. The permutation test gives every
+video another video's covariates and keeps its own curve.
+
+Results (2026-11-11, train + DEV, 145 videos; covariates added to a position + length baseline)
+----------------------------------------------------------------------------------------------
+                    per-second R2 gain   within-video rank corr. (baseline)   per-video late_hold   permutation p
+    ridge           +0.082               0.43 (0.28)                          0.46                  0.002  (500 shuffles)
+    boosted trees   +0.078               0.46 (0.32)                          0.41                  0.0099 (100 shuffles)
+
+Both p values are the smallest their shuffle counts allow. The payoff timeline does say where in a video viewers
+leave. This does not contradict the failed drop-off test in targets.py: that one asked for the single steepest
+second, this one scores the whole profile. Per video it is better than ridge on late_hold (0.40) and below the
+random forest (0.52); it adds nothing for early_hold (-0.01) and little for mid_hold (0.14). Its use is the
+per-second curve itself: where in a draft the loss is expected.
 """
 
 from __future__ import annotations

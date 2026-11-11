@@ -1,7 +1,30 @@
 """Other estimators against ridge on the targets that work (plan/03c section 15). Train + DEV only.
 
     ./venv/bin/python -m src.models.estimators                    # elastic net, random forest, boosted trees
-    ./venv/bin/python -m src.models.estimators --models tabpfn    # section 16.2; needs TABPFN_TOKEN in .env
+    ./venv/bin/python -m src.models.estimators --models tabpfn    # needs `pip install tabpfn` and TABPFN_TOKEN in .env
+
+Models, tuning grids and the rule were fixed before running: a model replaces ridge for a pair only if its error
+is lower in all 3 repeats and its R2 is higher by >= 0.02, and it then passes a permutation test.
+
+Results (2026-11-11, train + DEV, 145 videos; nested-CV R2 / rank correlation, same folds for every model)
+---------------------------------------------------------------------------------------------------------
+    pair                     ridge        elastic net   random forest   boosted trees   TabPFN
+    late_hold  x M1 core     0.09 / 0.40  0.07 / 0.39   0.24 / 0.52     0.19 / 0.48     0.28 / 0.55
+    late_hold  x M3 full     0.16 / 0.44  0.13 / 0.43   0.23 / 0.50     0.21 / 0.49     0.24 / 0.51
+    share_rate x M1 core     0.12 / 0.38  0.11 / 0.38   0.12 / 0.35     0.17 / 0.39     0.16 / 0.40
+    share_rate x M3 full     0.21 / 0.48  0.20 / 0.46   0.19 / 0.44     0.14 / 0.40     0.24 / 0.50
+    share_rate x format      0.18 / 0.43  0.17 / 0.39   0.15 / 0.34     0.17 / 0.40     0.18 / 0.41
+    early_hold x M1 core     0.11 / 0.31  0.13 / 0.31   0.16 / 0.34     0.17 / 0.33     0.14 / 0.31
+
+Decision: the random forest replaces ridge for late_hold with the M1 features. Its permutation test (fixed
+settings min_samples_leaf 5, max_features 0.33, 719 shuffles): observed rank correlation 0.517, largest shuffle
+0.308, p = 0.0014. Ridge stays for share_rate (M3 or format only). Elastic net never won.
+
+TabPFN (tabular foundation model, tabpfn 9.2.0, default settings) was tested as a benchmark and is not used:
+it was the strongest model on late_hold (0.55 vs the forest's 0.52), but its weights are licensed for
+non-commercial, non-production use and need an account and token to download, so anyone running this repo would
+need their own. Its permutation test was stopped before it finished; its numbers above are CV scores only.
+tabpfn is deliberately not in requirements.txt.
 """
 
 from __future__ import annotations

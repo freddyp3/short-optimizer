@@ -3,6 +3,32 @@
     ./venv/bin/python -m src.models.targets run        # nested CV, 8 targets x 4 recipes
     ./venv/bin/python -m src.models.targets perm       # one permutation test over all 32 pairs
     ./venv/bin/python -m src.models.targets dropoff    # do extracted timestamps mark where viewers leave
+
+The list of 8 targets x 4 recipes was fixed before anything was computed, and one permutation test covers all 32
+pairs (each shuffle moves the eight labels together and keeps the best of the 32).
+
+Results (2026-11-10, train + DEV, 145 videos, ridge; nested-CV R2, adjusted p)
+------------------------------------------------------------------------------
+Acceptable (beats every baseline in >= 9/10 repeats, adjusted p <= 0.05, holds on the views-corrected label):
+
+    late_hold      M1 core 0.087 (p 0.001)   M3 full 0.151 (p 0.001)
+    share_rate     M1 core 0.103 (p 0.005)   M3 full 0.214 (p 0.001)   format only 0.179 (p 0.002)
+    early_hold     M1 core 0.089 (p 0.007)
+    replay_level   M1 core 0.058 (p 0.032)   (nearly the same quantity as early_hold: Spearman -0.77)
+
+Not acceptable: mid_hold, mean_rrp, like_rate, comment_rate, and the code-only features (M4) on every target.
+
+late_hold coefficients have the hypothesised signs: later main payoff +, more payoffs +, longer tail after the
+last payoff -. share_rate is mostly format (gameplay clips and loot openings are shared less than edits).
+A flexible duration + date baseline explains none of these targets, so this is not a leftover length effect.
+The overall score fails although its parts work because features push parts of the curve in opposite directions
+(a late payoff lowers early_hold and raises late_hold).
+
+Drop-off timing fails (mean rank of the loss at the predicted second; 0.5 = chance, pass >= 0.60 and both nulls):
+last_payoff 0.46, main_payoff 0.46, loudness_peak 0.52. premise_clear scores 0.80 only because it is always in the
+first seconds, where every video loses viewers (p 0.43 against other videos' premise times).
+
+Limits: CV on videos that were visible, small effects, and the extractor's accuracy was never checked by hand.
 """
 
 from __future__ import annotations

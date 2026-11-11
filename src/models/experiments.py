@@ -7,6 +7,27 @@
 
 Every run is appended to data/models/experiments/log.jsonl. A candidate's hypothesis is written in its ``note``
 before it is run.
+
+Results (2026-11-10, target ``hold_resid``: lifetime average view percentage, residualised on length and era)
+-------------------------------------------------------------------------------------------------------------
+A recipe counted as acceptable only if it (1) had lower nested-CV error than every baseline in >= 9 of 10 repeats,
+(2) had permutation p <= 0.05 after charging for every recipe tried, (3) kept a positive rank correlation on the
+views-corrected label.
+
+Loop 1, train pool (125 videos): M0-M4 as registered plus candidates c01-c10. None acceptable. Every registered
+row chose the largest penalty, i.e. predicted the mean (R2 between -0.009 and -0.001). Best: c08, format features
+with capped labels, R2 +0.013, p 0.043 unadjusted, 0.27 adjusted for the 15 tries.
+
+Loop 2, train + DEV (145 videos; DEV's 20 strong/weak videos added by the creator's decision): the same 15 recipes
+plus n01-n04. None acceptable (every R2 <= 0, best adjusted p 0.65). No single feature separates DEV's 10 strong
+from its 10 weak videos beyond chance.
+
+Sanity check: the same code predicts raw average view percentage from log(duration) with nested-CV R2 0.82, so
+this is not a pipeline bug. Conclusion: the frozen features do not predict the overall hold score. What they do
+predict is in targets.py.
+
+The rank correlations near -0.25 in the log are what a near-constant prediction gives in CV (the fold mean moves
+against the held-out labels); read them as "no signal".
 """
 
 from __future__ import annotations
