@@ -1,19 +1,49 @@
 """Do similar past Shorts predict the outcome? Free check before nearest-example prompting (plan/03c section 17).
 
-    ./venv/bin/python -m src.models.neighbours
+    ./venv/bin/python -m src.models.neighbours           # theme / mechanics neighbours (section 17)
+    ./venv/bin/python -m src.models.neighbours --text    # title / description embeddings (section 18)
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+
 import numpy as np
+import pandas as pd
 
 from src.evals.hook_test.stats import spearman
 from src.models import cv, targets as T
+from src.models.dataset import GEMINI_EVAL, GEMINI_TRAIN
 from src.models.features import M1_COLS, history_features
+from src.models.hazard import RAW_DIR
 
 TARGETS = ("late_hold", "share_rate", "early_hold")
 VARIANTS = ("theme_past_k5", "theme_any_k5", "theme_any_k10", "mech_any_k10")
+TEXT_VARIANTS = ("title_any_k1", "title_any_k10", "desc_any_k1", "desc_any_k10")
+ENCODER = "sentence-transformers/all-mpnet-base-v2"
 REPEATS, N_PERM = 3, 1000
+
+
+def timelines(video_ids) -> list[str]:
+    """Gemini's timeline text from the raw record each video's frozen features came from."""
+    src = pd.concat([pd.read_csv(p, usecols=["video_id", "blind_id", "source_run_id"])
+                     for p in (GEMINI_TRAIN, GEMINI_EVAL)]).set_index("video_id")
+    return [json.loads((RAW_DIR / src.at[v, "source_run_id"] / f"{src.at[v, 'blind_id']}__r1.json")
+                       .read_text())["result"]["timeline"] for v in video_ids]
+
+
+def text_distances(df, export) -> dict[str, np.ndarray]:
+    """Cosine distance between MPNet embeddings of titles and of timeline descriptions (local model, no API)."""
+    from sentence_transformers import SentenceTransformer
+
+    model = SentenceTransformer(ENCODER)
+    titles = df["video_id"].map(export.videos.set_index("video_id")["title"]).fillna("").tolist()
+    out = {}
+    for name, texts in (("title", titles), ("desc", timelines(df["video_id"]))):
+        E = model.encode(texts, normalize_embeddings=True)
+        out[name] = 1 - E @ E.T
+    return out
 
 
 def distances(data) -> dict[str, np.ndarray]:
@@ -41,9 +71,13 @@ def oof(variant: str, data, dist: dict, y: np.ndarray, folds) -> np.ndarray:
     return pred
 
 
-def main() -> int:
-    df, data, _, _ = T.load()
-    dist = distances(data)
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--text", action="store_true")
+    args = ap.parse_args(argv)
+    df, data, _, export = T.load()
+    dist = text_distances(df, export) if args.text else distances(data)
+    VARIANTS = TEXT_VARIANTS if args.text else globals()["VARIANTS"]
     Y = df[list(TARGETS)].to_numpy(dtype=float)
     print(f"{'target':12}{'variant':16}{'Spearman':>10}{'R2':>8}")
     for j, t in enumerate(TARGETS):

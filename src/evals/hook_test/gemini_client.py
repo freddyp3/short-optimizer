@@ -73,6 +73,15 @@ def is_daily_quota(e: Exception) -> bool:
     return DAILY_QUOTA_RE.search(blob) is not None
 
 
+NETWORK_ERROR_NAMES = {"TransportError", "ConnectionError", "TimeoutError", "RemoteProtocolError"}
+NETWORK_RETRIES = 4
+
+
+def is_network_error(e: Exception) -> bool:
+    """Dropped or timed-out connection (httpx / httpcore / builtin), matched by class name to avoid importing httpx."""
+    return any(c.__name__ in NETWORK_ERROR_NAMES for c in type(e).__mro__)
+
+
 def retry_delay_s(e: Exception, attempt: int) -> float:
     blob = str(e) + json.dumps(getattr(e, "details", {}) or {}, default=str)
     m = RETRY_DELAY_RE.search(blob)
@@ -279,6 +288,13 @@ class GeminiHookTester:
                             "rerun the same command with --run-id to resume") from e
                     d = retry_delay_s(e, attempt)
                     log.warning("429, retrying in %.0fs (attempt %d)", d, attempt + 1)
+                    self.sleep(d)
+                    continue
+                if is_network_error(e):
+                    if attempt >= NETWORK_RETRIES:
+                        raise
+                    d = 10.0 * 3**attempt
+                    log.warning("network error %r, retrying in %.0fs (attempt %d)", e, d, attempt + 1)
                     self.sleep(d)
                     continue
                 if self._is_5xx(e):

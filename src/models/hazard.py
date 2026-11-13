@@ -122,6 +122,26 @@ def build(df: pd.DataFrame, retention: pd.DataFrame, payoffs: dict[str, list[dic
                     len(df), per.pop())
 
 
+TIMELINE_COVARIATES = ("no_change", "since_change_s")
+
+
+def timeline_covariates(df: pd.DataFrame, timelines: dict[str, list[dict]], seg: "Segments") -> np.ndarray:
+    """Two extra covariates from the one-second timeline (plan/03c section 20.3): nothing new is seen in the second
+    the segment starts in, and seconds since something new was last seen (capped). Rows in ``seg`` order."""
+    from src.tools.analyze_video.ab_score import NO_CHANGE
+
+    out = []
+    r = seg.r[: seg.per_video]
+    for row in df.itertuples():
+        tl = timelines[row.video_id]
+        still = np.array([bool(NO_CHANGE.match(e["seen"])) for e in tl])
+        last_change = np.maximum.accumulate(np.where(~still, np.arange(len(tl)), -1))
+        k = np.minimum((r * row.duration_s).astype(int), len(tl) - 1)
+        since = np.where(last_change[k] >= 0, k - last_change[k], CAP_S)
+        out.append(np.column_stack([still[k].astype(float), np.minimum(since, CAP_S)]))
+    return np.vstack(out)
+
+
 def fit_predict(model: str, Xtr, ytr, Xte) -> np.ndarray:
     if model == "ridge":
         mu, sd = Xtr.mean(axis=0), Xtr.std(axis=0)

@@ -9,7 +9,7 @@ import pytest
 from src.evals.hook_test import config as C
 from src.evals.hook_test.gemini_client import (
     DailyQuotaExceeded, GeminiHookTester, estimate_call_cost, is_daily_quota,
-    is_rate_limit, nominal_cost, retry_delay_s)
+    is_network_error, is_rate_limit, nominal_cost, retry_delay_s)
 
 GOOD_JSON = json.dumps({
     "video_description": "desc", "analysis": "scratch pad",
@@ -130,6 +130,23 @@ class TestAnalyze:
                              sleep=lambda s: 0)
         rec = t.analyze("vAAA111", blind_file, "p", 21.0)
         assert rec["status"] == "ok" and len(fake.models.calls) == 2
+
+    def test_retry_on_dropped_connection(self, tmp_path, blind_file):
+        class ReadError(ConnectionError):
+            pass
+        fake = FakeClient([ReadError("[Errno 54] Connection reset by peer")] * 2 + [fake_resp()])
+        waits = []
+        t = GeminiHookTester(client=fake, uploads_path=tmp_path / "u.json", sleep=waits.append)
+        rec = t.analyze("vabc", blind_file, "PROMPT", 21.0)
+        assert rec["status"] == "ok" and len(fake.models.calls) == 3 and waits == [10.0, 30.0]
+
+    def test_dropped_connection_gives_up(self, tmp_path, blind_file):
+        fake = FakeClient([ConnectionError("reset")] * 10)
+        t = GeminiHookTester(client=fake, uploads_path=tmp_path / "u.json", sleep=lambda s: 0)
+        with pytest.raises(ConnectionError):
+            t.analyze("vabc", blind_file, "PROMPT", 21.0)
+        assert len(fake.models.calls) == 5
+        assert not is_network_error(ValueError("x"))
 
     def test_daily_quota_stops(self, tmp_path, blind_file):
         fake = FakeClient([Err429("quota GenerateRequestsPerDayPerProject exceeded")] * 10)
