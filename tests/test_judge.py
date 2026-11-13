@@ -67,6 +67,16 @@ class TestNeighbours:
             nb = [j for j, _ in lib.neighbours(i, arm, np.random.default_rng(i))]
             assert len(set(nb)) == 5 and i not in nb
 
+    def test_threshold_arm_may_show_fewer_or_none(self, lib):
+        for i in range(len(lib)):
+            nb = lib.neighbours(i, "T30")
+            assert len(nb) <= 5 and i not in [j for j, _ in nb] and all(s >= 0.30 for _, s in nb)
+            assert [s for _, s in nb] == sorted((s for _, s in nb), reverse=True)
+        assert lib.neighbours(0, "T100") == []
+
+    def test_no_example_means_the_plain_prompt(self, lib):
+        assert P.build_prompt(lib, 0, "L2", "T100")[0] == P.build_prompt(lib, 0, "L0", "E")[0]
+
     def test_contrast_pick(self):
         order = np.arange(20)
         late = np.arange(20, dtype=float)

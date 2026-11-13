@@ -190,8 +190,8 @@ def build_prompt(lib: Library, i: int, variant: str, arm: str = "E",
     show, outcomes, compare, hint = VARIANTS[variant]
     parts = [HEAD.format(anchor=_points(lib.anchor(i))), "## The draft\n" + video_block(lib, i)]
     shown: list[int] = []
-    if show:
-        nb = lib.neighbours(i, arm, rng)
+    nb = lib.neighbours(i, arm, rng) if show else []
+    if nb:
         shown = [j for j, _ in nb]
         parts.append("## Similar past Shorts from this channel" + ("" if outcomes else " (their results are not shown)"))
         for letter, (j, sim) in zip(LETTERS, nb):

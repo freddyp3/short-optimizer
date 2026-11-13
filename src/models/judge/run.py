@@ -96,7 +96,7 @@ def main(argv=None) -> int:
     p.add_argument("--set", dest="set_name", required=True, choices=["pilot", "validation"])
     p.add_argument("--stage", required=True)
     p.add_argument("--stage-cap", type=float, required=True)
-    p.add_argument("--arm", default="E", choices=["E", "S", "random"])
+    p.add_argument("--arm", default="E", help="E, S, random, or T<percent> for a similarity threshold (e.g. T80)")
     p.add_argument("--model", default=C.DEFAULT_MODEL)
     p.add_argument("--video", action="store_true", help="send the draft's blinded video as well as its timeline")
     p.add_argument("--limit", type=int)
@@ -145,7 +145,15 @@ def main(argv=None) -> int:
     def work(v: str) -> str:
         est = float(np.mean(costs)) * 1.5 if costs else DEFAULT_CALL_EST * (5 if args.video else 1)
         ledger.check(est, args.stage, args.stage_cap)
-        rec = judge_one(lib, lib.index_of(v), args.variant, args.arm, args.model, client, video_contents)
+        i = lib.index_of(v)
+        base = RAW / tag_for("L0", "E", args.model, args.video, args.set_name) / f"{v}.json"
+        if args.variant != "L0" and base.exists() and not build_prompt(lib, i, args.variant, args.arm)[1]:
+            rec = json.loads(base.read_text())   # no example passed the threshold: the prompt is the L0 prompt
+            if rec["prompt"] == build_prompt(lib, i, args.variant, args.arm)[0]:
+                rec.update(variant=args.variant, arm=args.arm, reused_from=base.parent.name, cost_usd=0.0)
+                (out_dir / f"{v}.json").write_text(json.dumps(rec, indent=1))
+                return rec["status"]
+        rec = judge_one(lib, i, args.variant, args.arm, args.model, client, video_contents)
         rec.update(set=args.set_name, stage=args.stage)
         ledger.record(rec["cost_usd"], args.stage, f"{out_dir.name}/{v}")
         costs.append(rec["cost_usd"])

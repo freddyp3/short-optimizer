@@ -163,6 +163,9 @@ class Library:
         if arm == "S":
             order = o[np.argsort(self.dist_s[i, o], kind="stable")][:K]
             return [(int(j), float(1 / (1 + self.dist_s[i, j]))) for j in order]
+        if arm.startswith("T"):          # threshold arm: only videos at least this similar, at most K, may be none
+            order = o[np.argsort(-self.sim_e[i, o], kind="stable")][:K]
+            return [(int(j), float(self.sim_e[i, j])) for j in order if self.sim_e[i, j] >= int(arm[1:]) / 100]
         if arm == "random":
             return [(int(j), float(self.sim_e[i, j])) for j in rng.choice(o, K, replace=False)]
         raise ValueError(arm)
