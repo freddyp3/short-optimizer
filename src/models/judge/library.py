@@ -144,6 +144,7 @@ class Library:
     hint_points: np.ndarray          # (n, 5) out-of-fold per-second model
     hint_late_pct: np.ndarray        # out-of-fold random forest late hold, as a percentile 0-100
     split: dict
+    pool: np.ndarray | None = None   # positions that may serve as examples / neighbours (default: every video)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -152,7 +153,7 @@ class Library:
         return int(np.flatnonzero(self.df["video_id"].to_numpy() == video_id)[0])
 
     def others(self, i: int) -> np.ndarray:
-        return np.setdiff1d(np.arange(len(self)), [i])
+        return np.setdiff1d(np.arange(len(self)) if self.pool is None else self.pool, [i])
 
     def neighbours(self, i: int, arm: str, rng: np.random.Generator | None = None) -> list[tuple[int, float]]:
         """[(index, similarity 0-1)], most similar first. Never ``i`` itself."""

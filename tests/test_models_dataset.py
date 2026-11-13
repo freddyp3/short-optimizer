@@ -38,11 +38,14 @@ class TestGuard:
         with pytest.raises(ds.SplitLocked):
             ds.require_unlocked(split, tmp_path / "FROZEN")
 
-    @pytest.mark.parametrize("split", ["gate", "heldout"])
-    def test_open_with_marker(self, split, tmp_path):
+    def test_gate_opens_with_marker_heldout_needs_its_own_line(self, tmp_path):
         marker = tmp_path / "FROZEN"
-        marker.write_text("sha256=abc")
-        ds.require_unlocked(split, marker)
+        marker.write_text("sha256=abc\n")
+        ds.require_unlocked("gate", marker)
+        with pytest.raises(ds.SplitLocked):
+            ds.require_unlocked("heldout", marker)
+        marker.write_text("sha256=abc\nheldout_open=true\n")
+        ds.require_unlocked("heldout", marker)
 
     @pytest.mark.parametrize("split", ["train", "dev"])
     def test_train_and_dev_always_open(self, split, tmp_path):

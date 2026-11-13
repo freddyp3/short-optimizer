@@ -178,3 +178,34 @@ class TestNumbers:
     def test_perfect_prediction_scores_one(self, lib):
         Y = lib.df[list(S.HOLDS)].to_numpy()
         assert S.hold_scores(Y, Y).tolist() == pytest.approx([1, 1, 1, 1])
+
+
+class TestGateHelpers:
+    def test_residual_from_fit_matches_in_sample_residual(self, lib):
+        from src.evals.hook_test.score import residualize
+        from src.models.judge import gate as G
+        rows = lib.df.assign(published_at=["2024-06-01T00:00:00Z", "2024-11-01T00:00:00Z"] * 15)
+        y = np.random.default_rng(0).normal(size=len(rows))
+        np.testing.assert_allclose(G.residual_from_fit(y, rows, y, rows),
+                                   residualize(pd.Series(y), rows["duration_seconds"], rows["published_at"]).to_numpy(), atol=1e-9)
+
+    def test_residual_from_fit_ignores_the_new_rows_outcomes_in_the_fit(self, lib):
+        from src.models.judge import gate as G
+        rows = lib.df.assign(published_at=["2024-06-01T00:00:00Z", "2024-11-01T00:00:00Z"] * 15)
+        y = np.arange(len(rows), dtype=float)
+        a = G.residual_from_fit(y[:20], rows.iloc[:20], y[20:], rows.iloc[20:])
+        b = G.residual_from_fit(y[:20], rows.iloc[:20], y[20:] + 100, rows.iloc[20:])
+        np.testing.assert_allclose(b - a, 100)
+
+    def test_pool_keeps_query_videos_out_of_examples(self, lib):
+        import copy
+        g = copy.deepcopy(lib)
+        g.pool = np.arange(20)
+        for i in range(20, 30):
+            for arm in ("E", "S", "T30"):
+                assert all(j < 20 for j, _ in g.neighbours(i, arm))
+
+    def test_holm(self):
+        from src.models.judge import gate as G
+        adj = G.holm({"a": 0.01, "b": 0.04, "c": 0.03})
+        assert adj == pytest.approx({"a": 0.03, "c": 0.06, "b": 0.06})

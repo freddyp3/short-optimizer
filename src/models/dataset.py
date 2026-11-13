@@ -29,6 +29,7 @@ FROZEN_MARKER = Path(__file__).parent / "FROZEN"
 
 SPLITS = ("train", "dev", "gate", "heldout")
 LOCKED_SPLITS = ("gate", "heldout")
+HELDOUT_OPEN_LINE = "heldout_open=true"
 IS_SHORT_MAX_S = 20.0
 DURATION_TOLERANCE_S = 0.1
 GEMINI_BOOKKEEPING = ["split", "status", "invalid_reason", "source_run_id"]
@@ -43,6 +44,8 @@ def require_unlocked(split: str, marker: Path = FROZEN_MARKER) -> None:
         raise ValueError(f"unknown split {split!r}; expected one of {SPLITS}")
     if split in LOCKED_SPLITS and not Path(marker).exists():
         raise SplitLocked(f"{split} is locked until the model is frozen ({marker} missing, plan/03c section 7)")
+    if split == "heldout" and HELDOUT_OPEN_LINE not in Path(marker).read_text().splitlines():
+        raise SplitLocked(f"heldout stays locked until GATE has been reviewed ({HELDOUT_OPEN_LINE!r} not in {marker})")
 
 
 def add_hold_resid_views(pool: pd.DataFrame) -> pd.DataFrame:
