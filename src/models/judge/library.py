@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from src.models import cv, targets as T
-from src.models.features import M1_COLS, design
+from src.models.features import M1_COLS, design, prepare
 
 JUDGE_DIR = Path("data/models/judge")
 SPLIT_JSON = JUDGE_DIR / "split.json"
@@ -195,27 +195,34 @@ def embed_timelines(df: pd.DataFrame, timelines: dict, path: Path = EMB_NPZ) -> 
 
 
 def build(hazard_extra: bool = False) -> Library:
-    from src.models import hazard as H
+    df, _, _, export = T.load()
+    return build_from(df, export, EMB_NPZ, load_timelines(df), load_split, hazard_extra)
 
-    df, data, recipes, export = T.load()
-    timelines = load_timelines(df)
+
+def build_from(df: pd.DataFrame, export, emb_path: Path, timelines: dict, split_fn=None, hazard_extra: bool = False) -> Library:
+    """Library over the rows of ``df`` (targets already residualised on those rows); every hint is out of fold."""
+    from src.models import hazard as H
+    from src.models.experiments import all_recipes
+
+    df = df.reset_index(drop=True)
     missing = sorted(set(df["video_id"]) - set(timelines))
     if missing:
         raise RuntimeError(f"{len(missing)} videos have no valid one-second timeline, e.g. {missing[:3]}")
-    emb = embed_timelines(df, timelines)
+    emb = embed_timelines(df, timelines, emb_path)
+    data = prepare(df)
     X = data.matrix(M1_COLS)
     Z = (X - X.mean(axis=0)) / X.std(axis=0)
     folds = oof_folds(len(df))
     payoffs = H.load_payoffs(df["video_id"])
     seg = H.build(df, export.retention, payoffs)
     Xseg = np.column_stack([seg.base, seg.cov] + ([H.timeline_covariates(df, timelines, seg)] if hazard_extra else []))
-    rf = rf_late_oof(data, df["late_hold"].to_numpy(dtype=float), recipes["M1_core_mechanics"], folds)
+    rf = rf_late_oof(data, df["late_hold"].to_numpy(dtype=float), all_recipes(data)["M1_core_mechanics"], folds)
     return Library(
-        df=df.reset_index(drop=True), timelines=timelines, payoffs=payoffs,
+        df=df, timelines=timelines, payoffs=payoffs,
         points=curve_points(export.retention, df["video_id"]).to_numpy(),
         rewatch=tiers(df["replay_level"]).to_numpy(), likes=tiers(df["like_rate"]).to_numpy(),
         late=df["late_hold"].to_numpy(dtype=float), sim_e=emb @ emb.T,
         dist_s=np.sqrt(((Z[:, None, :] - Z[None, :, :]) ** 2).sum(axis=2)),
         hint_points=implied_points(seg, H.oof(seg, Xseg, "ridge", folds)),
         hint_late_pct=100 * (pd.Series(rf).rank(pct=True).to_numpy()),
-        split=load_split(df))
+        split=split_fn(df) if split_fn else {"all": df["video_id"].tolist()})
