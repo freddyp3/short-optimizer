@@ -34,12 +34,19 @@ from src.models.judge.library import (JUDGE_DIR, K, RAW_DIR, SEED, TIERS, V3_RUN
 from src.models.judge.prompt import build_prompt
 
 log = logging.getLogger("gate")
-GATE_RUN = "20261113T000000Z_gate_v3"
+RUNS = {"gate": "20261113T000000Z_gate_v3", "heldout": "20261113T000000Z_heldout_v3"}
+GATE_RUN = RUNS["gate"]
 ITEMS = ("early_hold", "mid_hold", "late_hold", "replay_level")
-GEMINI = {"Gemini, no examples": "j1_L0_E_3.8-flash_gate", "Gemini, examples >= 0.75": "j1_L2_T75_3.8-flash_gate",
-          "Gemini, 5 similar": "j1_L2_E_3.8-flash_gate"}
-SPECIALIST = {"drop moments": "Gemini, no examples", "mid_hold": "Gemini, no examples", "late_hold": "Random forest",
-              "rewatch": "Gemini, examples >= 0.75", "early_hold": "Structure neighbours"}
+GEMINI = {"Gemini, no examples": "j1_L0_E_3.8-flash", "Gemini, examples >= 0.75": "j1_L2_T75_3.8-flash",
+          "Gemini, 5 similar": "j1_L2_E_3.8-flash"}
+GEMINI_MEAN = "Gemini, mean of the two calls"
+SPECIALISTS = {
+    "gate": {"drop moments": "Gemini, no examples", "mid_hold": "Gemini, no examples", "late_hold": "Random forest",
+             "rewatch": "Gemini, examples >= 0.75", "early_hold": "Structure neighbours"},
+    # plan/03d section 12.2, fixed on the 145 before HELDOUT was opened
+    "heldout": {"drop moments": "Gemini, no examples", "mid_hold": GEMINI_MEAN, "late_hold": "Random forest",
+                "rewatch": "Gemini, examples >= 0.75", "early_hold": "Random forest"},
+}
 N_PERM = 10_000
 BLANKED = ["early_hold", "mid_hold", "late_hold", "replay_level", "like_rate", "share_rate", "comment_rate",
            "hold_resid", "hold_resid_views", "hold_score", "hook3s", "engagedViews"]
@@ -66,12 +73,12 @@ class Gate:
     per_second: np.ndarray       # (n_gate, 5) checkpoint predictions
 
 
-def build_gate() -> Gate:
+def build_gate(split: str = "gate") -> Gate:
     from sklearn.ensemble import RandomForestRegressor
 
     df, _, recipes, export = T.load()
     n = len(df)
-    g = load_split("gate").drop(columns=["mean_rrp"], errors="ignore")
+    g = load_split(split).drop(columns=["mean_rrp"], errors="ignore")
     raw = T.curve_targets(export.retention[export.retention["video_id"].isin(set(g["video_id"]))])
     g = g.merge(raw, on="video_id", how="left", validate="one_to_one")
     truth = pd.DataFrame({t: residual_from_fit(df[f"{t}_raw"], df, g[t], g) for t in ITEMS})
@@ -83,11 +90,11 @@ def build_gate() -> Gate:
             blank[c] = np.nan
     all_df = pd.concat([df, blank], ignore_index=True)
     gate_idx = np.arange(n, n + len(g))
-    timelines = load_timelines(all_df, runs=V3_RUNS + (GATE_RUN,))
+    timelines = load_timelines(all_df, runs=V3_RUNS + (RUNS[split],))
     missing = sorted(set(all_df["video_id"]) - set(timelines))
     if missing:
         raise RuntimeError(f"{len(missing)} videos have no valid one-second timeline")
-    emb = embed_timelines(all_df, timelines, JUDGE_DIR / "timeline_embeddings_gate.npz")
+    emb = embed_timelines(all_df, timelines, JUDGE_DIR / f"timeline_embeddings_{split}.npz")
     data = prepare(all_df)
     X = data.matrix(M1_COLS)
     Z = (X - X[:n].mean(axis=0)) / X[:n].std(axis=0)
@@ -110,12 +117,12 @@ def build_gate() -> Gate:
         late=np.concatenate([df["late_hold"].to_numpy(dtype=float), np.full(len(g), np.nan)]),
         sim_e=emb @ emb.T, dist_s=np.sqrt(((Z[:, None, :] - Z[None, :, :]) ** 2).sum(axis=2)),
         hint_points=np.vstack([nan_rows[:0].reshape(0, 5), np.full((n, 5), np.nan), per_second]),
-        hint_late_pct=np.full(n + len(g), np.nan), split={"gate": g["video_id"].tolist()}, pool=tr)
+        hint_late_pct=np.full(n + len(g), np.nan), split={split: g["video_id"].tolist()}, pool=tr)
     return Gate(lib=lib, gate_idx=gate_idx, truth=truth, rows=g.reset_index(drop=True),
                 forest=np.column_stack(forest), per_second=per_second)
 
 
-def extract(reverse: bool) -> int:
+def extract(reverse: bool, split: str = "gate") -> int:
     from dotenv import load_dotenv
 
     from src.evals.hook_test.gemini_client import sha256_file
@@ -123,12 +130,12 @@ def extract(reverse: bool) -> int:
     from src.tools.analyze_video.schema import render_prompt
 
     load_dotenv(".env")
-    if not (Path("src/models") / "FROZEN").exists():
-        raise SystemExit("src/models/FROZEN missing: GATE stays locked")
+    from src.models.dataset import require_unlocked
+    require_unlocked(split)
     vids = E.pick_eval_videos()
-    vids = vids[vids["eval_split"] == "gate"].sort_values("blind_id")
+    vids = vids[vids["eval_split"] == split].sort_values("blind_id")
     vids = vids.iloc[::-1] if reverse else vids
-    run_dir = RAW_DIR / GATE_RUN
+    run_dir = RAW_DIR / RUNS[split]
     run_dir.mkdir(parents=True, exist_ok=True)
     pf = E.PROMPTS_DIR / "v3.md"
     template, sha = pf.read_text(), sha256_file(pf)
@@ -144,7 +151,7 @@ def extract(reverse: bool) -> int:
         dur = E.blind_duration(bp)
         rec = ext.analyze(v["blind_id"], bp, render_prompt(template, dur), dur, fps=C.FPS,
                           media_resolution=C.MEDIA_RESOLUTION, prompt_version="v3", prompt_sha256=sha)
-        rec.update({"run_id": GATE_RUN, "run_k": 1, "split": "gate", "video_id": v["video_id"], "band": None,
+        rec.update({"run_id": RUNS[split], "run_k": 1, "split": split, "video_id": v["video_id"], "band": None,
                     "duration_s_file": dur, "duration_s_export": float(v["duration_s_export"])})
         if not out.exists():
             out.write_text(json.dumps(rec, indent=2))
@@ -154,16 +161,16 @@ def extract(reverse: bool) -> int:
     return 0
 
 
-def check() -> int:
+def check(split: str = "gate") -> int:
     """Exit checks that read no GATE outcome: timelines valid, prompts free of blanked values and GATE examples."""
     from src.tools.analyze_video.schema import windows
 
-    recs = [json.loads(p.read_text()) for p in sorted((RAW_DIR / GATE_RUN).glob("*__r1.json"))]
+    recs = [json.loads(p.read_text()) for p in sorted((RAW_DIR / RUNS[split]).glob("*__r1.json"))]
     ok = [r for r in recs if r["status"] == "ok"]
     bad_w = sum(len(r["result"]["timeline"]) != len(windows(r["duration_s_file"])) for r in ok)
-    print(f"GATE timelines: {len(recs)} records, {len(ok)} valid, window count wrong: {bad_w}, "
+    print(f"{split} timelines: {len(recs)} records, {len(ok)} valid, window count wrong: {bad_w}, "
           f"cost ${sum(r.get('cost_usd_paid_equiv', 0) for r in recs):.2f}")
-    gate = build_gate()
+    gate = build_gate(split)
     lib, gset = gate.lib, set(gate.gate_idx.tolist())
     problems = 0
     shown_counts = {}
@@ -177,7 +184,7 @@ def check() -> int:
             counts.append(len(shown))
         shown_counts[f"{variant}/{arm}"] = (float(np.mean(counts)), int(np.sum(np.array(counts) == 0)))
     print(f"prompts checked: {3 * len(gate.gate_idx)}; problems: {problems}; examples shown (mean, drafts with none): {shown_counts}")
-    fails = len(ok) != 40 or bad_w or problems
+    fails = len(ok) != len(gate.gate_idx) or bad_w or problems
     print("EXIT CHECK:", "FAIL" if fails else "PASS")
     return int(bool(fails))
 
@@ -197,8 +204,8 @@ def holm(ps: dict[str, float]) -> dict[str, float]:
     return out
 
 
-def score() -> int:
-    gate = build_gate()
+def score(split: str = "gate") -> int:
+    gate = build_gate(split)
     lib, idx, rows = gate.lib, gate.gate_idx, gate.rows
     from src.evals.hook_test.data import load_export
     export = load_export(Path(json.loads(C.SELECTION_JSON_PATH.read_text())["export_dir"]))
@@ -206,11 +213,12 @@ def score() -> int:
     replay = gate.truth["replay_level"].to_numpy()
     ids = rows["video_id"].tolist()
     order = {t: k for k, t in enumerate(TIERS)}
-    runs = {name: S.load_run(tag).set_index("video_id").loc[ids] for name, tag in GEMINI.items()}
+    runs = {name: S.load_run(f"{tag}_{split}").set_index("video_id").loc[ids] for name, tag in GEMINI.items()}
     n_bad = {name: int((f["status"] != "ok").sum()) for name, f in runs.items()}
     pts = lambda f: f[["p10", "p25", "p50", "p75", "p95"]].to_numpy(dtype=float)
     nb = [[j for j, _ in lib.neighbours(int(i), "S")] for i in idx]
     holds = {name: S.residual_holds(pts(f), rows) for name, f in runs.items()}
+    holds[GEMINI_MEAN] = S.residual_holds((pts(runs["Gemini, no examples"]) + pts(runs["Gemini, examples >= 0.75"])) / 2, rows)
     holds["Random forest"] = gate.forest[:, :3]
     holds["Per-second model"] = S.residual_holds(gate.per_second, rows)
     holds["Structure neighbours"] = S.residual_holds(np.vstack([lib.points[j].mean(axis=0) for j in nb]), rows)
@@ -224,7 +232,7 @@ def score() -> int:
 
     rng = np.random.default_rng(SEED)
     out = {"n": len(ids), "invalid_outputs": n_bad, "holds": {}, "rewatch": {}, "drops": {}, "tests": {}}
-    print(f"GATE: {len(ids)} videos; invalid Gemini outputs: {n_bad}")
+    print(f"{split.upper()}: {len(ids)} videos; invalid Gemini outputs: {n_bad}")
     print(f"\n{'source':28}{'early':>7}{'mid':>7}{'late':>7}{'mean':>7}{'rewatch':>9}{'drop':>7}")
     for name, R in holds.items():
         s = S.hold_scores(R, Y)
@@ -240,7 +248,7 @@ def score() -> int:
 
     col = {"early_hold": 0, "mid_hold": 1, "late_hold": 2}
     ps = {}
-    for item, src in SPECIALIST.items():
+    for item, src in SPECIALISTS[split].items():
         if item == "drop moments":
             d = drops[src]
             ps[item] = max(d["null1_uniform_p"], d["null2_permutation_p"])
@@ -260,7 +268,7 @@ def score() -> int:
         ci = f"  (95% {t['ci95'][0]:.2f} to {t['ci95'][1]:.2f})" if "ci95" in t else ""
         print(f"{item:18}{t['source']:28}{t['score']:>7.2f}{t['p']:>9.4f}{adj[item]:>9.4f}  {'PASS' if t['pass'] else 'fail'}{ci}")
     S.SCORES.mkdir(parents=True, exist_ok=True)
-    (S.SCORES / "gate.json").write_text(json.dumps(out, indent=1, default=float))
+    (S.SCORES / f"{split}.json").write_text(json.dumps(out, indent=1, default=float))
     return 0
 
 
@@ -270,10 +278,11 @@ def main(argv=None) -> int:
     sub.add_parser("extract").add_argument("--reverse", action="store_true")
     sub.add_parser("check")
     sub.add_parser("score")
+    p.add_argument("--split", default="gate", choices=sorted(RUNS))
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    return extract(a.reverse) if a.cmd == "extract" else check() if a.cmd == "check" else score()
+    return extract(a.reverse, a.split) if a.cmd == "extract" else check(a.split) if a.cmd == "check" else score(a.split)
 
 
 if __name__ == "__main__":

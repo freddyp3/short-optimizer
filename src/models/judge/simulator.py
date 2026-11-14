@@ -242,7 +242,7 @@ def cmd_build() -> int:
     return 0
 
 
-def cmd_gate() -> int:
+def cmd_gate(split: str = "gate") -> int:
     from src.models.judge import gate as G
 
     cfg = json.loads(CONFIG_JSON.read_text())
@@ -250,7 +250,7 @@ def cmd_gate() -> int:
     export = load_export(Path(json.loads(C.SELECTION_JSON_PATH.read_text())["export_dir"]))
     p = library_pieces(lib, export)
     calib = {k: tuple(v) for k, v in cfg["calibration"].items()}
-    gate = G.build_gate()
+    gate = G.build_gate(split)
     glib, idx, rows = gate.lib, gate.gate_idx, gate.rows
     n = len(p.ids)
     gids = rows["video_id"].tolist()
@@ -259,7 +259,7 @@ def cmd_gate() -> int:
     pool = np.arange(n)
     ref = np.vstack([reference(p.truth, p.duration, pool, d) for d in gdur])
     nb = [[j for j, _ in glib.neighbours(int(i), "S")] for i in idx]
-    run = S.load_run("j1_L0_E_3.8-flash_gate").set_index("video_id").loc[gids]
+    run = S.load_run(f"j1_L0_E_3.8-flash_{split}").set_index("video_id").loc[gids]
     seg = H.build(lib.df, export.retention, lib.payoffs)
     segg = H.build(rows, export.retention, glib.payoffs)
     ps = H.fit_predict("ridge", np.column_stack([seg.base, seg.cov]), seg.y, np.column_stack([segg.base, segg.cov])).reshape(len(gids), -1)
@@ -267,7 +267,7 @@ def cmd_gate() -> int:
               "mid": gemini_mid_signal(run[["p10", "p25", "p50", "p75", "p95"]].to_numpy(dtype=float), ref),
               "late": gate.forest[:, 2]}
     gp = Pieces(gids, gdur, truth, ref, signal, ps, rows)
-    print("GATE check of the frozen simulator (not a clean test: GATE's source table has been seen)\n" + HEADER)
+    print(f"{split}: frozen simulator\n" + HEADER)
     out = {}
     for name, use, shape in [("reference only (length)", (), False), (f"FROZEN: {cfg['name']}", tuple(cfg["use"]), cfg["shape"])]:
         pred = predict(gp, calib, use, shape)
@@ -276,8 +276,8 @@ def cmd_gate() -> int:
     res = truth[:, CHECK_IDX] - pred[:, CHECK_IDX]
     lo, hi = np.array(cfg["band"])
     out["coverage"] = float(((res >= lo) & (res <= hi)).mean())
-    print(f"80 % band coverage on GATE: {out['coverage']:.3f}")
-    (S.SCORES / "simulator_gate.json").write_text(json.dumps(out, indent=1, default=float))
+    print(f"80 % band coverage: {out['coverage']:.3f}")
+    (S.SCORES / f"simulator_{split}.json").write_text(json.dumps(out, indent=1, default=float))
     return 0
 
 
@@ -325,9 +325,11 @@ def cmd_onecall() -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("cmd", choices=["onecall", "build", "gate"])
+    ap.add_argument("cmd", choices=["onecall", "build", "gate", "heldout"])
     a = ap.parse_args(argv)
-    return {"onecall": cmd_onecall, "build": cmd_build, "gate": cmd_gate}[a.cmd]()
+    if a.cmd in ("gate", "heldout"):
+        return cmd_gate(a.cmd)
+    return {"onecall": cmd_onecall, "build": cmd_build}[a.cmd]()
 
 
 if __name__ == "__main__":

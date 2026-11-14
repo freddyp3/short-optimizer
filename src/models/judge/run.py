@@ -93,7 +93,7 @@ def judge_one(lib: Library, i: int, variant: str, arm: str, model: str, client, 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--variant", required=True, choices=sorted(VARIANTS))
-    p.add_argument("--set", dest="set_name", required=True, choices=["pilot", "validation", "gate"])
+    p.add_argument("--set", dest="set_name", required=True, choices=["pilot", "validation", "gate", "heldout"])
     p.add_argument("--stage", required=True)
     p.add_argument("--stage-cap", type=float, required=True)
     p.add_argument("--arm", default="E", help="E, S, random, or T<percent> for a similarity threshold (e.g. T80)")
@@ -109,9 +109,9 @@ def main(argv=None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     load_dotenv()
 
-    if args.set_name == "gate":
+    if args.set_name in ("gate", "heldout"):
         from src.models.judge.gate import build_gate
-        lib = build_gate().lib
+        lib = build_gate(args.set_name).lib
     else:
         lib = build(hazard_extra=args.hazard_extra)
     ids = lib.split[args.set_name]
