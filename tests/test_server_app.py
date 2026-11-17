@@ -307,7 +307,7 @@ def test_upload_page_is_self_contained_and_has_the_security_headers(env):
     assert not re.search(r"\son\w+\s*=", page)
     assert 'type="file"' in page and 'name="video"' in page and 'method="post"' in page and "multipart/form-data" in page
     assert 'name="gemini_key" type="password"' in page and 'maxlength="200"' in page and "never stored" in page
-    assert "8 to 60 seconds" in page and "100 MB" in page and "deleted from the server" in page
+    assert "8-60 seconds" in page and "100 MB" in page and "deleted from the server" in page
     assert env.token not in page and url.rsplit("/", 1)[1] not in page
 
 
