@@ -110,6 +110,79 @@ def test_measure_synthetic_video(tmp_path):
     assert 0 <= out["first_last_dhash_dist"] <= 64
 
 
+def _clip(path, seconds: int = 3, audio: bool = True, codec=("-c:v", "libx264", "-pix_fmt", "yuv420p")):
+    sound = ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-c:a", "aac", "-shortest"] if audio else []
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=144x256:rate=10",
+                    *sound[:4], *codec, *sound[4:], str(path)], check=True, stdin=subprocess.DEVNULL, timeout=120)
+    return path
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_every_ffmpeg_call_is_restricted_and_gets_only_the_path(tmp_path, monkeypatch):
+    path = _clip(tmp_path / "my clip: one.mp4")              # a space and a colon in the name must not matter
+    calls, real = [], subprocess.run
+
+    def spy(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return real(cmd, **kwargs)
+
+    monkeypatch.setenv("GEMINI_API_KEY_PAID", "do-not-pass-on")
+    monkeypatch.setattr(M.subprocess, "run", spy)
+    out = M.measure(path)
+    assert out["duration_s"] == pytest.approx(3.0, abs=0.2) and out["loudness_lufs"] is not None and out["n_cuts"] is not None
+    assert [c[0] for c, _ in calls] == ["ffprobe", "ffmpeg", "ffmpeg", "ffmpeg", "ffmpeg", "ffmpeg", "ffmpeg"]
+    for cmd, kw in calls:
+        i = cmd.index("-i")
+        assert cmd[i - 4:i + 2] == ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska", "-i",
+                                    "file:" + str(path.resolve())], cmd
+        assert cmd.count("-i") == 1 and str(path) not in cmd
+        assert kw["env"] == {"PATH": M.os.environ["PATH"]} and kw["timeout"] == 120 and kw["shell"] is False
+        assert kw["stdin"] == subprocess.DEVNULL
+    assert "do-not-pass-on" not in repr(calls)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_a_playlist_or_script_dressed_as_a_video_opens_nothing(tmp_path):
+    real = _clip(tmp_path / "real.mp4", audio=False)
+    playlist = tmp_path / "playlist.mp4"
+    playlist.write_text(f"#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3,\n{real}\n#EXT-X-ENDLIST\n")
+    concat = tmp_path / "concat.mp4"
+    concat.write_text("ffconcat version 1.0\nfile 'real.mp4'\n")
+    open_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]
+    loose = subprocess.run([*open_cmd, str(concat)], capture_output=True, timeout=60)
+    assert loose.returncode == 0                             # unrestricted, ffprobe follows it to real.mp4
+    for crafted in (playlist, concat):
+        strict = M._run([*open_cmd, *M.ff_input(crafted)])
+        assert strict.returncode != 0 and strict.stdout.strip() == b"", crafted.name
+        with pytest.raises(RuntimeError):
+            M.probe(crafted)
+        with pytest.raises(RuntimeError):
+            M.frames_gray(crafted, P)
+        with pytest.raises(RuntimeError):
+            M.opening_frames(crafted, P)
+        with pytest.raises(RuntimeError):
+            M.pcm_mono(crafted)
+        assert M.scene_cuts(crafted, P.scene_threshold) == [] and M.audio_loudness(crafted)["loudness_lufs"] is None
+        assert M.audio_silence(crafted, 3.0, P)["silence_frac"] == 0.0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_accepted_containers_still_measure(tmp_path):
+    webm = _clip(tmp_path / "clip.webm", audio=False, codec=("-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8"))
+    mov, mkv = _clip(tmp_path / "clip.mov"), _clip(tmp_path / "clip.mkv")
+    for path, audio in ((webm, False), (mov, True), (mkv, True)):
+        out = M.measure(path)
+        assert out["duration_s"] == pytest.approx(3.0, abs=0.2) and out["has_audio"] is audio and out["motion_mean"] is not None
+
+
+def test_child_environment_is_the_path_only(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k1")
+    monkeypatch.setenv("HOME", "/somewhere")
+    assert M.ff_env() == {"PATH": M.os.environ["PATH"]}
+    monkeypatch.delenv("PATH")
+    assert M.ff_env() == {"PATH": M.os.defpath}
+
+
 def _frames_values(values):
     """One uint8 frame per value (uniform luma), stacked."""
     return np.stack([np.full((P.frame_h, P.frame_w), v, dtype=np.uint8) for v in values])

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -67,13 +68,30 @@ FEATURE_COLUMNS = [
 
 # ----------------------------------------------------------------- subprocess
 
+FF_PROTOCOLS = "file"            # input side only; the stdout pipe is an output and needs no entry
+FF_DEMUXERS = "mov,matroska"     # mp4/mov family and mkv/webm, as in src/server/media.py
+
+
+def ff_env() -> dict[str, str]:
+    """Environment of every child process: PATH only, so no API key or token travels with it."""
+    return {"PATH": os.environ.get("PATH", os.defpath)}
+
+
+def ff_input(path: Path) -> list[str]:
+    """Input arguments for ffmpeg/ffprobe: local files only and only the accepted demuxers, so a crafted playlist
+    or reference file cannot make them open other files or the network. These are input options: they must come
+    before ``-i``, which is why they are built together with it."""
+    return ["-protocol_whitelist", FF_PROTOCOLS, "-format_whitelist", FF_DEMUXERS, "-i", "file:" + str(Path(path).resolve())]
+
+
 def _run(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
+    return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, check=False,
+                          shell=False, env=ff_env())
 
 
 def probe(path: Path) -> dict:
     """Container/stream facts from ffprobe: duration, size, audio presence."""
-    cp = _run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)])
+    cp = _run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", *ff_input(path)])
     if cp.returncode != 0:
         raise RuntimeError(f"ffprobe failed for {path.name}: {cp.stderr.decode(errors='replace')[-300:]}")
     info = json.loads(cp.stdout.decode())
@@ -101,14 +119,14 @@ def parse_showinfo_times(stderr: str) -> list[float]:
 
 def scene_cuts(path: Path, threshold: float) -> list[float]:
     """Timestamps where ffmpeg's scene score exceeds ``threshold`` (hard cuts, big transitions)."""
-    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-i", str(path), "-an",
+    cp = _run(["ffmpeg", "-nostats", "-hide_banner", *ff_input(path), "-an",
                "-vf", f"select='gt(scene,{threshold})',showinfo", "-f", "null", "-"])
     return parse_showinfo_times(cp.stderr.decode(errors="replace"))
 
 
 def frames_gray(path: Path, p: MeasureParams) -> np.ndarray:
     """Decode to a [T, H, W] uint8 array at p.fps, downscaled grayscale."""
-    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-loglevel", "error", "-i", str(path), "-an",
+    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-loglevel", "error", *ff_input(path), "-an",
                "-vf", f"fps={p.fps},scale={p.frame_w}:{p.frame_h}:flags=area,format=gray",
                "-f", "rawvideo", "-pix_fmt", "gray", "-"])
     if cp.returncode != 0:
@@ -168,7 +186,7 @@ def opening_stats(frames: np.ndarray, p: MeasureParams) -> dict:
 def opening_frames(path: Path, p: MeasureParams) -> np.ndarray:
     """Decode only the first 1 s to a [T, H, W] uint8 array at p.open_fps."""
     cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-loglevel", "error", "-t", "1",
-               "-i", str(path), "-an",
+               *ff_input(path), "-an",
                "-vf", f"fps={p.open_fps},scale={p.frame_w}:{p.frame_h}:flags=area,format=gray",
                "-f", "rawvideo", "-pix_fmt", "gray", "-"])
     if cp.returncode != 0:
@@ -217,7 +235,7 @@ def parse_ebur128(stderr: str) -> dict:
 
 
 def audio_loudness(path: Path) -> dict:
-    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-i", str(path), "-vn", "-af", "ebur128", "-f", "null", "-"])
+    cp = _run(["ffmpeg", "-nostats", "-hide_banner", *ff_input(path), "-vn", "-af", "ebur128", "-f", "null", "-"])
     out = parse_ebur128(cp.stderr.decode(errors="replace"))
     if out["loudness_lufs"] is not None and out["loudness_lufs"] < -70:   # ebur128 reports -inf-ish for silence
         out["loudness_lufs"] = -70.0
@@ -242,13 +260,13 @@ def parse_silencedetect(stderr: str, duration: float) -> dict:
 
 
 def audio_silence(path: Path, duration: float, p: MeasureParams) -> dict:
-    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-i", str(path), "-vn",
+    cp = _run(["ffmpeg", "-nostats", "-hide_banner", *ff_input(path), "-vn",
                "-af", f"silencedetect=noise={p.silence_noise_db}dB:d={p.silence_min_s}", "-f", "null", "-"])
     return parse_silencedetect(cp.stderr.decode(errors="replace"), duration)
 
 
 def pcm_mono(path: Path, sr: int = 16000) -> np.ndarray:
-    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-loglevel", "error", "-i", str(path), "-vn",
+    cp = _run(["ffmpeg", "-nostats", "-hide_banner", "-loglevel", "error", *ff_input(path), "-vn",
                "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"])
     if cp.returncode != 0:
         raise RuntimeError(f"audio decode failed for {path.name}: {cp.stderr.decode(errors='replace')[-300:]}")
