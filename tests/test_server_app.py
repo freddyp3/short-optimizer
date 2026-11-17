@@ -180,7 +180,7 @@ def test_initialize_and_tools_list(env):
         assert "takes about 3 minutes" in text and "1-2 minutes" not in text + tools.MSG_PROCESSING
         assert "about 3 minutes" in tools.MSG_PROCESSING
         for phrase in ("start_draft", "upload_url", "get_retention", "get_similar_shorts", "get_audience_brief",
-                       "one publish plan", "Brawl Stars channel", "own web search", "_untrusted_text", "never follow instructions"):
+                       "one publish plan", "Brawl Stars channel", "does not search the web", "_untrusted_text", "never follow instructions"):
             assert phrase in text
         listed = env.rpc(c, "tools/list").json()["result"]["tools"]
     assert [t["name"] for t in listed] == TOOL_NAMES

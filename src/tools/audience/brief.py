@@ -54,18 +54,35 @@ RULES = (
                           "[\U0001F525\u2764\U0001F44D\U0001F451\U0001F4AF\U0001F60D]", re.I)),
 )
 
-WRITING_RULES = """Write the audience reaction in three parts, with exactly these labels and in this order.
+WRITING_RULES = """Build the audience reaction in three steps, then write it in three parts.
+
+Step 1, brainstorm what to search for. Read the draft description and list the brawlers, game modes, skins, memes, \
+sounds and formats that appear in it (the search hints are a rough start, not the full list). For each, write the \
+searches that would show what players think about it today: recent balance changes, releases, events and patch \
+notes that touch it; what players argue or joke about on community sites such as Reddit; whether the topic is \
+rising, stale or controversial. Prefer sources from the last two weeks.
+
+Step 2, research as a separate step. If you can delegate to a sub-agent or a research mode, hand it the search list \
+and ask for a short summary of the current consensus with a link for each point; otherwise run the searches \
+yourself. Finish this step and summarise the consensus before you write any comment. If web search is not \
+available, say so and skip to step 3 with only the tool results.
+
+Step 3, plan the comments from three inputs together: the draft itself, what this channel's viewers really wrote \
+on the similar past Shorts, and the current consensus from step 2. Decide which themes are likely and which of \
+today's talking points viewers would bring up, then write the three parts below with exactly these labels, in \
+this order.
 
 1. "Your viewers": what this channel's own audience did and said on the similar past Shorts. Use only the real \
 retention numbers, rewatch and like tiers, comment counts and comments returned by these tools. Quote comments word \
 for word, name the past Short each belongs to ("past Short 17"), and state how similar that Short is to the draft.
 
-2. "Brawl Stars right now": what is current in the game and its community that bears on this draft. Run your own web \
-search, starting from the search hints, and give a link for every statement. If you did not search or found nothing \
-relevant, say so in one sentence and leave the part at that.
+2. "Brawl Stars right now": the consensus from step 2 that bears on this draft, with a link for every statement \
+and how recent it is. If you did not search or found nothing relevant, say so in one sentence and leave the part \
+at that.
 
-3. "Simulated comments": at most eight comments viewers might write under the draft, in the tone of the real ones. \
-Mark the part clearly as simulated and written by you; these are not real comments and not a forecast.
+3. "Simulated comments": at most eight comments viewers might write under the draft, in the tone of the real ones \
+and reflecting the themes from step 3. Mark the part clearly as simulated and written by you; these are not real \
+comments and not a forecast.
 
 For all three parts: tie every claim to its evidence (a number or quote from a tool result, or a link from your \
 search). Do not invent statistics, percentages, view counts or comment counts, and do not predict views. The \

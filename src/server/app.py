@@ -98,8 +98,10 @@ once and for 30 minutes.
 3. Call get_retention with the draft_id. If it answers "processing", call it again. If it answers "failed", tell \
 the user the reason.
 4. Call get_similar_shorts and get_audience_brief with the same draft_id.
-5. For the "Brawl Stars right now" part, run your own web search, starting from the search hints in the audience \
-brief. The server does not search the web.
+5. For the audience reaction follow the three steps in writing_rules of the audience brief: brainstorm what to \
+search for from the draft description, research the current Brawl Stars consensus as a separate step (delegate it \
+to a sub-agent if you can, otherwise search yourself), then plan the comments from the draft, the real past \
+comments and that consensus. The server does not search the web.
 6. Write one publish plan: how viewers are expected to watch the draft (early, middle, end, the drop moments, \
 rewatching) with the reasons and the stated evidence, what to change, and the audience reaction in the three parts \
 described by writing_rules in the audience brief.
