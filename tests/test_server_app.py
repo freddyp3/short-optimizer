@@ -728,3 +728,14 @@ def test_the_library_is_warmed_with_the_hugging_face_hub_switched_off(monkeypatc
     monkeypatch.setattr("src.tools.predict_retention.tool.state", lambda: seen.update({k: os.environ.get(k) for k in A.OFFLINE_ENV}))
     A._real_warm()
     assert seen == {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+
+
+def test_instructions_keep_ideas_grounded_in_tool_results_and_close_to_the_draft():
+    text = " ".join(app_module.INSTRUCTIONS.split()) if "app_module" in globals() else None
+    if text is None:
+        from src.server import app as _app
+        text = " ".join(_app.INSTRUCTIONS.split())
+    for phrase in ("each one grounded in a tool result", "same footage, same concept", "Do not use general YouTube advice",
+                   "give fewer", "do not add fixes of your own", "not tested predictions",
+                   "change to the video's structure", "leave the content to the creator"):
+        assert phrase in text, phrase
