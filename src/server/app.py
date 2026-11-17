@@ -112,6 +112,13 @@ How to present the publish plan (keep it short enough to read in a minute; use t
 below this channel's usual), the main reason in plain words, and the evidence grade in two or three words.
 - "Where viewers leave": the two drop moments as timestamps with the reason, the larger loss marked.
 - "Fix before posting": at most three concrete edits, each tied to a second of the video, most valuable first.
+- "Ideas to make it stronger": up to three ideas that go beyond cutting and trimming. Look at what the \
+better-holding similar past Shorts did that the draft does not, and at what viewers reacted to in their comments. \
+Consider: an on-screen text hook or challenge in the first second (quote the exact wording a past Short used when \
+one did); a clearer premise or stake; how the ending lands or loops; sound and timing to the beat; a line that \
+invites comments. For each idea say which past Short or comment it comes from and how that Short held viewers. \
+These are ideas drawn from this channel's history, not tested predictions: say so in one short line, and if the \
+similar Shorts offer nothing relevant, give fewer ideas or none.
 - "Rewatch": one line.
 - "Similar past Shorts": two or three of the closest, with how they held viewers and one real comment each; say \
 so plainly when the matches are loose.
