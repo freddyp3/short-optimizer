@@ -1,0 +1,131 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Shorts Pre-Publish Copilot: architecture</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#f7f8fb}
+body{font-family:-apple-system,'SF Pro Display','Helvetica Neue',Inter,system-ui,sans-serif}
+svg.layer{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+.shadow{fill:none}.card{fill:#fff;stroke:#e4e7ee;stroke-width:1.2;filter:url(#sh);transition:stroke .3s,fill .3s}
+.node{transition:transform .3s}.node text{fill:#1a2238;font-size:18px;font-weight:600;letter-spacing:-.01em;pointer-events:none;transition:fill .3s}
+.node.on .card{stroke:#f97316;stroke-width:2.2;filter:url(#shOn)}.node.on{transform:translateY(-3px)}
+.node.dim .card{fill:#fbfbfd}.node.dim text{fill:#a3abbd}.node.dim .ic{opacity:.35}
+.node.click{cursor:pointer}.node.click:hover .card{stroke:#fdba74}
+.ic{pointer-events:none}
+.line{fill:none;stroke:#dde1ea;stroke-width:2;stroke-linejoin:round}
+.prog{fill:none;stroke:#f97316;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
+.flow{display:none;fill:none;stroke:#fff;stroke-width:2.5;stroke-linejoin:round;stroke-dasharray:3 15;stroke-linecap:round;opacity:0;animation:march .7s linear infinite}
+.flow.on{opacity:.95}@keyframes march{to{stroke-dashoffset:-18}}
+.chip rect{fill:#eef0ff;stroke:#c9ccfb}.chip text{fill:#4b4bd6;font-size:15px;font-weight:600}.chip{opacity:.35;transition:opacity .4s}.chip.on{opacity:1}
+.group>rect:first-child{fill:#fff7ed;stroke:#fdba74;stroke-width:1.5;transition:fill .3s,stroke .3s}.group text{fill:#c2410c;font-size:16px;font-weight:600;transition:fill .3s}.group.dim>rect:first-child{fill:#fbfbfd;stroke:#e4e7ee}.group.dim text{fill:#a3abbd}
+.feed{fill:none;stroke:#c3c9d6;stroke-width:1.6;stroke-dasharray:2 7;stroke-linecap:round}
+.layer{will-change:transform,opacity;transition:opacity .32s ease,transform .42s cubic-bezier(.2,.8,.2,1);transform-origin:50% 50%}
+.init *{transition:none!important}.hide{opacity:0;pointer-events:none}#topS.hide{transform:scale(1.1)}#detS.hide{transform:scale(.92)}
+.crumb{fill:#f97316;font-size:17px;font-weight:600;cursor:pointer}.title{fill:#1a2238;font-size:36px;font-weight:700;letter-spacing:-.02em}
+.dnode{opacity:0;transition:opacity .45s}.dnode.in{opacity:1}
+.dline{stroke-dashoffset:var(--l);stroke-dasharray:var(--l);transition:stroke-dashoffset 1.1s ease .15s}.dline.in{stroke-dashoffset:0}
+.group.on>rect:first-child{stroke:#f97316;stroke-width:2.2}.group.click{cursor:pointer}.group .gi{transition:opacity .3s}.group.dim .gi{opacity:.35}
+.res rect{fill:#fff7ed;stroke:#f97316;stroke-width:1.8}.res text{fill:#9a3412;font-size:16px;font-weight:650}.res circle{fill:#f97316}
+.res rect,.res text,.res circle{transition:fill .3s,stroke .3s}.res{transition:transform .3s}.res.on{transform:translateY(-3px)}.res.dim rect{fill:#fbfbfd;stroke:#e4e7ee}.res.dim text{fill:#a3abbd}.res.dim circle{fill:#d5d9e3}.res.on rect{stroke-width:2.8;filter:url(#shOn)}
+.tile{fill:#fff;stroke:#fde3c8;stroke-width:1.5}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<filter id="sh" x="-20%" y="-40%" width="140%" height="200%"><feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#1a2238" flood-opacity=".08"/><feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000" flood-opacity=".05"/></filter>
+<filter id="shOn" x="-30%" y="-60%" width="160%" height="260%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#f97316" flood-opacity=".22"/></filter>
+</defs></svg>
+<svg id="topS" class="layer" viewBox="-30 0 1720 900" preserveAspectRatio="xMidYMid meet"><g id="top" transform="translate(112 64)"></g></svg>
+<svg id="detS" class="layer hide" viewBox="-30 0 1720 900" preserveAspectRatio="xMidYMid meet"><rect id="bg" x="-30" width="1720" height="900" fill="transparent"/><g id="detail"></g></svg>
+<script>
+const ns='http://www.w3.org/2000/svg',H=74,Y=420;
+const mk=(t,a,p,txt)=>{const e=document.createElementNS(ns,t);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;p.appendChild(e);return e};
+const ICONS={
+ 'User/Creator':'<circle cx="0" cy="-5" r="6" fill="#334155"/><path d="M-11 13a11 10 0 0 1 22 0z" fill="#334155"/>',
+ 'Claude':'<g transform="translate(-14 -14) scale(1.1667)"><path fill="#D97757" d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/></g>',
+ 'MCP server':'<rect x="-13" y="-12" width="26" height="10" rx="3" fill="#10b981"/><rect x="-13" y="2" width="26" height="10" rx="3" fill="#10b981"/><circle cx="-8" cy="-7" r="1.8" fill="#fff"/><circle cx="-8" cy="7" r="1.8" fill="#fff"/>',
+ 'Gemini':'<g transform="translate(-14 -14) scale(1.1667)"><path fill="#4285F4" d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/></g>',
+ 'Retention verdicts':'<rect x="-13" y="2" width="6" height="11" rx="1.5" fill="#f43f5e"/><rect x="-3" y="-5" width="6" height="18" rx="1.5" fill="#f43f5e"/><rect x="7" y="-13" width="6" height="26" rx="1.5" fill="#f43f5e"/>',
+ 'Code':'<path d="M-5-9l-9 9 9 9M5-9l9 9-9 9" fill="none" stroke="#64748b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>',
+ 'Similar Shorts (RAG)':'<rect x="-13" y="-9" width="17" height="22" rx="3" fill="#fbbf24" stroke="#fff" stroke-width="1.5"/><rect x="-5" y="-13" width="17" height="22" rx="3" fill="#fb923c" stroke="#fff" stroke-width="1.5"/><path d="M1-6v8l7-4z" fill="#fff"/>',
+ 'Random forest':'<path d="M0-14l9 12h-5l7 9H-11l7-9h-5z" fill="#10b981"/><rect x="-2" y="7" width="4" height="7" rx="1" fill="#92400e"/>',
+ 'Per-second model':'<circle r="13" fill="#f59e0b"/><path d="M0-7V0l5 3" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
+ 'Publish plan':'<rect x="-11" y="-14" width="22" height="28" rx="3" fill="#a3e635" stroke="#fff" stroke-width="1.5"/><path d="M-6-6l2.5 2.5L1-8M-6 3l2.5 2.5L1 1" fill="none" stroke="#1c1917" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4-5h4M4 4h4" stroke="#1c1917" stroke-width="1.8" stroke-linecap="round"/>'};
+ICONS['LLM-as-a-judge']=ICONS['Gemini'];ICONS['Search similar Shorts']=ICONS['Similar Shorts (RAG)'];
+ICONS['Embed timeline']='<g fill="#6366f1"><circle cx="-9" cy="-9" r="3"/><circle cx="0" cy="-9" r="3" opacity=".5"/><circle cx="9" cy="-9" r="3"/><circle cx="-9" cy="0" r="3" opacity=".5"/><circle cx="0" cy="0" r="3"/><circle cx="9" cy="0" r="3" opacity=".5"/><circle cx="-9" cy="9" r="3"/><circle cx="0" cy="9" r="3" opacity=".5"/><circle cx="9" cy="9" r="3"/></g>';
+ICONS['Draft features']='<g stroke="#f97316" stroke-width="3" stroke-linecap="round"><path d="M-5-8h17M-5 0h17M-5 8h17"/><path d="M-12-8h.1M-12 0h.1M-12 8h.1"/></g>';
+const st=(c,d)=>`<path d="${d}" fill="none" stroke="${c}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
+ICONS['Structure features']=st('#64748b','M-5-8h17M-5 0h17M-5 8h17M-12-8h.1M-12 0h.1M-12 8h.1');
+ICONS['Average 200 trees']=st('#10b981','M-12-10L-1 0L-12 10M-12 0H12M6-6l6 6-6 6');
+ICONS['Split into slices']='<rect x="-14" y="-10" width="28" height="20" rx="4" fill="#f59e0b"/>'+st('#fff','M-5-10V10M4-10V10').replace('stroke-width="3"','stroke-width="2.2"');
+ICONS['Exits per slice']=st('#f59e0b','M-12-10V10H0M-2 0H12M7-5l5 5-5 5');
+ICONS['Real viewer comments']='<path d="M-13-11h26a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H-2l-7 6v-6h-4a2 2 0 0 1-2-2V-9a2 2 0 0 1 2-2z" fill="#ec4899"/><path d="M-8-4h16M-8 2h10" stroke="#fff" stroke-width="2" stroke-linecap="round"/>';
+ICONS['Group by theme']='<rect x="-13" y="-13" width="11" height="11" rx="3" fill="#ec4899"/><rect x="2" y="-13" width="11" height="11" rx="3" fill="#0ea5e9"/><rect x="-13" y="2" width="11" height="11" rx="3" fill="#10b981"/><rect x="2" y="2" width="11" height="11" rx="3" fill="#f59e0b"/>';
+ICONS['Claude web search']=ICONS['Claude'];
+ICONS['Find topics']=st('#0ea5e9','M-6-12L-9 12M7-12L4 12M-12-5H12M-13 5H11');
+ICONS['Split into seconds']=ICONS['Split into slices'];ICONS['Ridge regression']=st('#f59e0b','M-12 9L12-9')+'<g fill="#f59e0b"><circle cx="-8" cy="1" r="2.6"/><circle cx="-2" cy="6" r="2.6"/><circle cx="3" cy="-7" r="2.6"/><circle cx="9" cy="-1" r="2.6"/></g>';ICONS['Viewers lost per second']=ICONS['Exits per slice'];
+const GLYPH={globe:'<g fill="none" stroke="#fff" stroke-width="2.2"><circle r="10"/><ellipse rx="4.5" ry="10"/><path d="M-10 0H10"/></g>',drop:st('#fff','M-10-7L-3 0L1-4L10 5M10-1V5H4'),hold:'<g fill="#fff"><rect x="-10" y="1" width="5" height="8" rx="1"/><rect x="-2.5" y="-4" width="5" height="13" rx="1"/><rect x="5" y="-9" width="5" height="18" rx="1"/></g>',
+ curve:st('#fff','M-10-8C-2-8-3 8 10 8'),chat:'<path d="M-10-8h20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H-1l-6 5v-5h-3a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" fill="#fff"/>'};
+const width=s=>ICONS[s]?310:Math.max(150,s.length*11.6+56);
+function card(p,c,y,cls){const wrap=mk('g',{},p),x=c.cx-c.w/2,ic=ICONS[c.n];const el=mk('g',{class:'node '+(cls||'')},wrap);mk('rect',{class:'card',x,y:y-H/2,width:c.w,height:H,rx:14},el);
+ if(ic){const g=mk('g',{class:'ic',transform:`translate(${x+40} ${y})`},el);g.innerHTML=ic}
+ mk('text',ic?{x:x+74,y:y+7}:{x:c.cx,y:y+7,'text-anchor':'middle'},el,c.n);el.wrap=wrap;return el}
+const topL=document.getElementById('top'),det=document.getElementById('detail'),topS=document.getElementById('topS'),detS=document.getElementById('detS');
+const P={cr:['User/Creator',175,230],cl:['Claude',530,230],mcp:['MCP server',885,230],gem:['Gemini',1240,195],code:['Code',1240,285],plan:['Publish plan',175,400]};
+const PATHS={e1:'M330 230H375',e2:'M685 230H730',e3:'M1040 230H1065',f1:'M1240 342V406H830V470',f2:'M1240 342V470',r1:'M655 535H590V267',r2:'M1240 600V655H590V267',e6:'M470 267V400H330',e7:'M175 363V267'};
+const gl=mk('g',{},topL),progs={},flows={};
+for(const k in PATHS){mk('path',{class:'line',d:PATHS[k]},gl);const pr=mk('path',{class:'prog',d:PATHS[k]},gl),len=pr.getTotalLength();pr.style.strokeDasharray=len;pr.style.strokeDashoffset=len;progs[k]=[pr,len];flows[k]=mk('path',{class:'flow',d:PATHS[k]},gl)}
+const fe=mk('g',{class:'group'},gl);mk('rect',{x:1065,y:118,width:350,height:224,rx:20},fe);mk('text',{x:1087,y:147},fe,'feature extraction');
+const rp=mk('g',{class:'group'},gl);mk('rect',{x:655,y:470,width:350,height:130,rx:20},rp);mk('text',{x:677,y:499},rp,'retention prediction');
+const tiles=(g,names,x0)=>names.forEach((n,i)=>{const x=x0+i*77;mk('rect',{class:'tile gi',x:x-27,y:525,width:54,height:54,rx:13},g);mk('g',{class:'gi',transform:`translate(${x} 552) scale(1.15)`},g).innerHTML=ICONS[n]});
+tiles(rp,['Search similar Shorts','LLM-as-a-judge','Random forest','Ridge regression'],715);
+const ar=mk('g',{class:'group'},gl);mk('rect',{x:1065,y:470,width:350,height:130,rx:20},ar);mk('text',{x:1087,y:499},ar,'audience reaction');
+tiles(ar,['Search similar Shorts','Real viewer comments','Group by theme','Claude web search'],1125);
+
+const dots=[0,1].map(()=>mk('circle',{r:7,fill:'#f97316',stroke:'#fff','stroke-width':3,opacity:0},topL)),N={};
+for(const k in P)N[k]=card(topL,{n:P[k][0],w:310,cx:P[k][1]},P[k][2],'');
+const PH=[['h',['cr'],1.8],['m','e1',.9],['h',['cl'],1.8],['m','e2',.9],['h',['mcp'],2.2],['m','e3',.9],['h',['gem','code'],3],['m','f1',1.1],['h',['rp'],1],['o',['rp']],
+ ['m','f2',.8],['h',['ar'],1],['o',['ar']],['m',['r1','r2'],2],['h',['cl'],2.6],['m','e6',1.1],['h',['plan'],2.4],['m','e7',.9],['h',['cr'],2]];
+function render(i,u){const seen=new Set();let lit=[];PH.forEach((ph,j)=>{if(ph[0]==='m')[].concat(ph[1]).forEach(k=>{const [pr,len]=progs[k];pr.style.strokeDashoffset=j<i?0:j===i?len*(1-u):len;flows[k].classList.toggle('on',j<i||(j===i&&u>=1))});
+  else if(j<=i){ph[1].forEach(k=>seen.add(k));if(j===i)lit=ph[1]}});
+ for(const k in N){N[k].classList.toggle('on',lit.includes(k));N[k].classList.toggle('dim',i>=0&&!seen.has(k))}
+ [[fe,'gem'],[rp,'rp'],[ar,'ar']].forEach(([g,k])=>{g.classList.toggle('dim',i>=0&&!seen.has(k));g.classList.toggle('on',lit.includes(k))});
+ dots.forEach(d=>d.setAttribute('opacity',0));const ph=PH[i];if(ph&&ph[0]==='m')[].concat(ph[1]).forEach((k,n)=>{const [pr,len]=progs[k],pt=pr.getPointAtLength(len*u);dots[n].setAttribute('cx',pt.x);dots[n].setAttribute('cy',pt.y);dots[n].setAttribute('opacity',1)})}
+let raf=null,timers=[],D=null;const M={cur:-1};
+const nextStop=(seq,i,d)=>{do{i+=d}while(i>=0&&i<seq.length&&seq[i][0]!=='h');return Math.max(0,Math.min(i,seq.length-1))};
+function go(seq,st,rend,d){cancelAnimationFrame(raf);
+ if(d<0){st.cur=nextStop(seq,st.cur,-1);rend(st.cur,1);return}
+ const i=st.cur+1;if(i>=seq.length){rend(st.cur,1);return}st.cur=i;
+ if(seq[i][0]==='h'){rend(i,1);return}
+ const dur=seq[i][2]*1000,t0=performance.now();
+ (function tick(now){const u=Math.min((now-t0)/dur,1),e=u<.5?2*u*u:1-Math.pow(-2*u+2,2)/2;rend(i,e);if(u<1)raf=requestAnimationFrame(tick);else{st.cur=Math.min(i+1,seq.length-1);rend(st.cur,1)}})(t0)}
+const later=(t,f)=>timers.push(setTimeout(f,t*1000));
+const slot=(n,i)=>{const g=(900-280*n)/(n+1),e=n===3?0:g,m=n===3?30:g;return 290+e+i*(280+m)+140};
+function stage(name){timers.forEach(clearTimeout);timers=[];cancelAnimationFrame(raf);det.innerHTML='';
+ mk('text',{class:'title',x:60,y:160},det,name);
+ const lines=mk('g',{},det),S={els:[],seq:[],cur:-1,
+  link(d){mk('path',{class:'line',d},lines);const pr=mk('path',{class:'prog',d},lines),len=pr.getTotalLength();pr.style.strokeDasharray=len;pr.style.strokeDashoffset=len;return {pr,len,fl:mk('path',{class:'flow',d},lines)}},
+  box(n,cx,y,w){const el=card(det,{n,w:w||280,cx},y,'');S.els.push(el);return el},
+  res(txt,glyph,cx,w,y){const g=mk('g',{class:'res'},det),x=cx-w/2;mk('rect',{x,y:y-H/2,width:w,height:H,rx:14},g);mk('circle',{cx:x+41,cy:y,r:23},g);
+   mk('g',{transform:`translate(${x+41} ${y})`},g).innerHTML=GLYPH[glyph];mk('text',{x:x+78,y:y+6},g,txt);S.els.push(g);return g},
+  h(e,dur){S.seq.push(['h',[].concat(e),dur])},m(L,dur){S.seq.push(['m',L,dur])}};return S}
+function finish(S){S.dot=mk('circle',{r:7,fill:'#f97316',stroke:'#fff','stroke-width':3,opacity:0},det);D=S;
+ const ds=new URLSearchParams(location.search).get('dstep');detS.classList.add('init');D.cur=ds!=null?+ds:0;renderD(D.cur,+(new URLSearchParams(location.search).get('u')||1));detS.getBoundingClientRect();detS.classList.remove('init');topS.classList.add('hide');detS.classList.remove('hide')}
+function renderD(i,u){const seen=new Set();let lit=[];D.seq.forEach((ph,j)=>{if(ph[0]==='m'){const L=ph[1];L.pr.style.strokeDashoffset=j<i?0:j===i?L.len*(1-u):L.len;L.fl.classList.toggle('on',j<i||(j===i&&u>=1))}
+  else if(j<=i){ph[1].forEach(e=>seen.add(e));if(j===i)lit=ph[1]}});
+ D.els.forEach(e=>{e.classList.toggle('on',lit.includes(e));e.classList.toggle('dim',i>=0&&!seen.has(e))});
+ D.dot.setAttribute('opacity',0);const ph=D.seq[i];if(ph&&ph[0]==='m'){const pt=ph[1].pr.getPointAtLength(ph[1].len*u);D.dot.setAttribute('cx',pt.x);D.dot.setAttribute('cy',pt.y);D.dot.setAttribute('opacity',1)}}
+function tree(name,rows){const S=stage(name),draft=S.box('Draft features',125,450,230);
+ S.h(draft,1);rows.forEach(([y,names,out,gl])=>{const N=names.length;
+  names.forEach((n,i)=>{const cx=slot(N,i),L=S.link(i?`M${slot(N,i-1)+140} ${y}H${cx-140}`:`M240 450${y===450?'':`H265V${y}`}H${cx-140}`);S.m(L,i?.5:.8);S.h(S.box(n,cx,y),1.5)});
+  S.m(S.link(`M${slot(N,N-1)+140} ${y}H1230`),.5);S.h(S.res(out,gl,1440,420,y),2)});finish(S)}
+function openRP(){const rows=[[300,['Embed timeline','Search similar Shorts','LLM-as-a-judge'],'drop-off points · middle retention · rewatch','drop'],
+  [450,['Structure features','Random forest','Average 200 trees'],'opening retention · ending retention','hold'],
+  [600,['Split into seconds','Ridge regression','Viewers lost per second'],'second-by-second retention curve','curve']];
+ tree('retention prediction',rows)}
+function openAR(){tree('audience reaction',[[375,['Search similar Shorts','Real viewer comments','Group by theme'],'past comment themes','chat'],
+  [525,['Find topics','Claude web search'],'current community talk','globe']])}
+function close(){timers.forEach(clearTimeout);cancelAnimationFrame(raf);detS.classList.add('hide');topS.classList.remove('hide')}
+const inD=()=>!detS.classList.contains('hide');
+addEventListener('keydown',e=>{const k=e.code,fwd=k==='ArrowRight'||k==='Space'||k==='PageDown',back=k==='ArrowLeft'||k==='PageUp';
+ if(k==='Escape'||k==='Backspace')close();
+ else if(fwd||back){e.preventDefault();
+  if(inD()){if(fwd?D.cur>=D.seq.length-1:D.cur<=0)close();else go(D.seq,D,renderD,fwd?1:-1);return}
+  const nx=PH[M.cur+1];if(fwd&&nx&&nx[0]==='o'){cancelAnimationFrame(raf);M.cur++;render(M.cur,1);nx[1][0]==='rp'?openRP():openAR()}else go(PH,M,render,fwd?1:-1)}});
+const q=new URLSearchParams(location.search);if(q.get('step')!=null){M.cur=+q.get('step');render(M.cur,+(q.get('u')||1))}if(q.get('view')==='rp')openRP();else if(q.get('view')==='ar')openAR();
+</script></body></html>
