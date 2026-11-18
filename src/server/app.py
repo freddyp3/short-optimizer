@@ -123,7 +123,7 @@ concept, same length or shorter. Do not propose a different video, new footage t
 different topic. Do not use general YouTube advice or anything from your own knowledge here; if the tool results \
 support fewer than three ideas, give fewer, and if they support none, say that the similar Shorts offered nothing \
 to borrow. Say in one short line that these are ideas from this channel's history, not tested predictions.
-- "Rewatch": one line.
+- "Rewatch": one line, marked as experimental.
 - "Similar past Shorts": two or three of the closest, with how they held viewers and one real comment each; say \
 so plainly when the matches are loose.
 - "Audience reaction": the three labelled parts from writing_rules, with simulated comments clearly marked.
