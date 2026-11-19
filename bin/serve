@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Start and stop the Claude MCP server and its tunnel on this machine.
+#
+#   bin/serve start     start the tunnel and the server, print the connector address
+#   bin/serve stop      stop both
+#   bin/serve status    what is running, and the connector address
+#   bin/serve logs      follow the server log
+#
+# Settings are read from .env (lines starting with SO_). Without any, a temporary Cloudflare address is used; it
+# changes on every start. For a fixed address on your own domain set both:
+#   SO_PUBLIC_BASE_URL=https://copilot.example.com     the address users connect to
+#   SO_TUNNEL_NAME=short-optimizer                     a named Cloudflare tunnel routed to that address
+# Google sign-in needs the fixed address, plus SO_GOOGLE_CLIENT_ID and SO_GOOGLE_CLIENT_SECRET.
+set -u
+cd "$(dirname "$0")/.."
+RUN=data/server/run
+PORT_DEFAULT=8765
+mkdir -p "$RUN" && chmod 700 data/server "$RUN" 2>/dev/null
+
+if [ -f .env ]; then
+  while IFS= read -r line; do
+    case "$line" in SO_*=*) export "$line" ;; esac
+  done < .env
+fi
+PORT="${SO_PORT:-$PORT_DEFAULT}"
+
+alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
+
+stop_one() {
+  if alive "$1"; then
+    kill "$(cat "$RUN/$1.pid")" 2>/dev/null
+    for _ in $(seq 40); do alive "$1" || break; sleep 0.25; done
+    alive "$1" && kill -9 "$(cat "$RUN/$1.pid")" 2>/dev/null
+    echo "stopped $1"
+  fi
+  rm -f "$RUN/$1.pid"
+}
+
+address() { [ -f "$RUN/address" ] && cat "$RUN/address"; }
+
+status() {
+  for name in tunnel server; do
+    if alive "$name"; then echo "$name: running (pid $(cat "$RUN/$name.pid"))"; else echo "$name: stopped"; fi
+  done
+  if alive server && alive tunnel && [ -n "$(address)" ]; then
+    echo "connector address: $(address)/mcp"
+  fi
+}
+
+start() {
+  if alive server || alive tunnel; then
+    echo "already running; use 'bin/serve stop' first"; status; return 1
+  fi
+  if lsof -tiTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "port $PORT is in use by another program (pid $(lsof -tiTCP:"$PORT" -sTCP:LISTEN | head -1)); stop it first"; return 1
+  fi
+  : > "$RUN/tunnel.log"
+  if [ -n "${SO_PUBLIC_BASE_URL:-}" ] && [ -n "${SO_TUNNEL_NAME:-}" ]; then
+    nohup cloudflared tunnel --no-autoupdate run --url "http://127.0.0.1:$PORT" "$SO_TUNNEL_NAME" >> "$RUN/tunnel.log" 2>&1 &
+    echo $! > "$RUN/tunnel.pid"
+    base="${SO_PUBLIC_BASE_URL%/}"
+  elif [ -n "${SO_PUBLIC_BASE_URL:-}" ]; then
+    echo "SO_PUBLIC_BASE_URL is set but SO_TUNNEL_NAME is not; set both, or neither for a temporary address"; return 1
+  else
+    nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$PORT" >> "$RUN/tunnel.log" 2>&1 &
+    echo $! > "$RUN/tunnel.pid"
+    base=""
+    for _ in $(seq 120); do
+      base="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUN/tunnel.log" | head -1)"
+      [ -n "$base" ] && break
+      alive tunnel || break
+      sleep 0.25
+    done
+    if [ -z "$base" ]; then
+      echo "the tunnel did not start; see $RUN/tunnel.log"; stop_one tunnel; return 1
+    fi
+  fi
+  echo "$base" > "$RUN/address"
+  SO_PUBLIC_BASE_URL="$base" SO_DATA_DIR="${SO_DATA_DIR:-data/server}" \
+    nohup ./venv/bin/python -m src.server.app >> "$RUN/server.log" 2>&1 &
+  echo $! > "$RUN/server.pid"
+  nohup caffeinate -i -w "$(cat "$RUN/server.pid")" >/dev/null 2>&1 &     # no idle sleep while the server runs
+  for _ in $(seq 240); do
+    curl -s -o /dev/null -m 2 "http://127.0.0.1:$PORT/icon.png" && break
+    if ! alive server; then
+      echo "the server did not start:"; tail -5 "$RUN/server.log"; stop_one tunnel; rm -f "$RUN/server.pid"; return 1
+    fi
+    sleep 0.25
+  done
+  status
+  [ -z "${SO_TUNNEL_NAME:-}" ] && echo "this address is temporary: it changes the next time you start"
+  return 0
+}
+
+case "${1:-}" in
+  start) start ;;
+  stop) stop_one server; stop_one tunnel; rm -f "$RUN/address" ;;
+  status) status ;;
+  logs) tail -n 50 -f "$RUN/server.log" ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
