@@ -29,7 +29,7 @@ ACCEPT = "application/json, text/event-stream"
 
 
 class Upstream:
-    """The home server as seen from the front. ``post(url, json=, headers=, timeout=)`` defaults to ``httpx.post``."""
+    """The home server as seen from the front. ``post(url, json=, headers=, timeout=)`` defaults to ``requests.post``."""
 
     def __init__(self, base_url: str, secret: str, post: Callable | None = None, timeout_s: float = TIMEOUT_S):
         if not secret or len(secret) < 32:
@@ -41,9 +41,9 @@ class Upstream:
         or answers with anything but a tool result."""
         post = self._post
         if post is None:
-            import httpx
+            import requests
 
-            post = httpx.post
+            post = requests.post
         body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
         headers = {"Authorization": f"Bearer {self._secret}", USER_HEADER: user_id, "Accept": ACCEPT}
         try:

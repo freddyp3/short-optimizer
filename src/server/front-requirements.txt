@@ -1,0 +1,6 @@
+mcp==2.3.0
+uvicorn==0.54.0
+python-multipart==0.0.33
+python-dotenv==1.2.2
+pydantic==2.14.1
+requests==2.34.2

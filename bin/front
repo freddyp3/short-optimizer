@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# The always-on front: a small Google Cloud machine that signs users in around the clock and passes tool calls
+# to the home server (this laptop, started with bin/serve) whenever it is on. See src/server/front.py.
+#
+#   bin/front deploy              copy the code and settings to the machine and restart it
+#   bin/front status              is the front running, and does it reach the home server
+#   bin/front logs                the front's recent request log
+#   bin/front users list          signups (also: list --pending, approve EMAIL, block EMAIL, stats)
+#   bin/front ssh                 a shell on the machine
+#
+# Settings of the front are in secrets/front.env (not committed); its tunnel credentials in secrets/front_tunnel.json.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+PROJECT="${SO_GCP_PROJECT:-short-optimizer}" ZONE="${SO_FRONT_ZONE:-us-west1-b}" VM="${SO_FRONT_VM:-so-front}"
+remote() { gcloud --project "$PROJECT" compute ssh "$VM" --zone "$ZONE" --tunnel-through-iap --quiet --command "$1" 2> >(grep -vE 'NumPy|please see|^WARNING: *$|known hosts|private SSH key|^$' >&2); }
+copy() { gcloud --project "$PROJECT" compute scp --zone "$ZONE" --tunnel-through-iap --quiet "$@" 2> >(grep -vE 'NumPy|please see|^WARNING: *$|known hosts|private SSH key|^$' >&2); }
+
+case "${1:-}" in
+  deploy)
+    for f in secrets/front.env secrets/front_tunnel.json; do [ -f "$f" ] || { echo "$f is missing"; exit 1; }; done
+    rm -rf build/front && mkdir -p build/front/src
+    cp src/__init__.py build/front/src/ && cp -R src/server build/front/src/server
+    find build/front -name __pycache__ -prune -exec rm -rf {} + ; rm -f build/front/src/server/e2e_check.py
+    cp bin/front-setup.sh build/front/setup.sh
+    COPYFILE_DISABLE=1 tar --no-xattrs -C build/front -czf build/front.tgz .
+    copy build/front.tgz secrets/front.env secrets/front_tunnel.json "$VM":/tmp/
+    remote 'set -e; rm -rf /tmp/front && mkdir /tmp/front && tar -C /tmp/front -xzf /tmp/front.tgz && sudo bash /tmp/front/setup.sh'
+    ;;
+  status)
+    remote 'systemctl is-active so-front so-tunnel | paste -sd" " -; sudo journalctl -u so-front -n 200 --no-pager -o cat | grep listening | tail -1; free -m | sed -n 2p'
+    ;;
+  logs) remote 'sudo journalctl -u so-front -n '"${2:-40}"' --no-pager -o cat' ;;
+  users) shift; remote "cd /opt/so/app && sudo -u so env SO_DATA_DIR=/var/lib/so /opt/so/venv/bin/python -m src.server.users --db /var/lib/so/server.sqlite3 $(printf '%q ' "$@")" ;;
+  ssh) gcloud --project "$PROJECT" compute ssh "$VM" --zone "$ZONE" --tunnel-through-iap ;;
+  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

@@ -47,7 +47,11 @@ status() {
     if alive "$name"; then echo "$name: running (pid $(cat "$RUN/$name.pid"))"; else echo "$name: stopped"; fi
   done
   if alive server && alive tunnel && [ -n "$(address)" ]; then
-    echo "connector address: $(address)/mcp"
+    if [ -n "${SO_PROXY_SECRET:-}" ]; then
+      echo "home address: $(address) (users connect to the front; see bin/front status)"
+    else
+      echo "connector address: $(address)/mcp"
+    fi
   fi
 }
 

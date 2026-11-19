@@ -137,9 +137,9 @@ class Google:
             "scope": "openid email profile", "state": state, "prompt": "select_account"})
 
     def identify(self, code: str) -> Identity:
-        import httpx
+        import requests
 
-        post, get = self._post or httpx.post, self._get or httpx.get
+        post, get = self._post or requests.post, self._get or requests.get
         try:
             r = post(GOOGLE_TOKEN_URL, data={"code": code, "client_id": self.client_id, "client_secret": self._secret,
                                              "redirect_uri": self.redirect_uri, "grant_type": "authorization_code"}, timeout=15)
