@@ -1006,7 +1006,8 @@ ICON_FILES = {"/icon.png": ("icon.png", "image/png"), "/apple-touch-icon.png": (
 
 
 def icon_routes() -> list[Route]:
-    """The connector's logo (orange square, white play mark): public, the only files the server hands out."""
+    """The connector's logo (orange square, white play mark) and a one-line home page that points at it: public,
+    the only files the server hands out. Claude shows the site icon of the address's registered domain."""
     def route(path: str, name: str, mime: str) -> Route:
         data = (ASSETS / name).read_bytes()
 
@@ -1017,7 +1018,21 @@ def icon_routes() -> list[Route]:
                                                             "Cache-Control": "public, max-age=86400",
                                                             "Cross-Origin-Resource-Policy": "cross-origin"})
         return Route(path, icon, methods=["GET"])
-    return [route(path, name, mime) for path, (name, mime) in ICON_FILES.items()]
+    async def home(request: Request) -> Response:
+        info: RequestInfo = request.scope["so"]
+        info.route, info.outcome = "/", "home"
+        body = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Shorts Pre-Publish Copilot</title>'
+                '<link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" href="/icon.svg" type="image/svg+xml">'
+                '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+                f'<style>{STYLE}</style></head><body><main class="card"><h1>Shorts Pre-Publish Copilot</h1>'
+                '<p class="note">A connector for Claude that checks a draft YouTube Short before you post it. '
+                'Add it in Claude under Connectors to use it.</p></main></body></html>')
+        headers = {**SECURITY_HEADERS, "Cache-Control": "public, max-age=3600"}
+        headers["Content-Security-Policy"] = headers["Content-Security-Policy"].replace("default-src 'none'", "default-src 'none'; img-src 'self'")
+        return Response(body, media_type="text/html; charset=utf-8", headers=headers)
+
+    return [Route("/", home, methods=["GET"]), *(route(path, name, mime) for path, (name, mime) in ICON_FILES.items())]
 
 
 class Body:

@@ -767,6 +767,9 @@ def test_the_connector_icon_is_public_and_named_in_the_server_info(env):
             assert r.headers["x-content-type-options"] == "nosniff"
         assert c.get("/icon.png").content.startswith(b"\x89PNG") and b"#f97316" in c.get("/icon.svg").content
         assert c.post("/icon.png").status_code == 405 and c.get("/assets/icon.png").status_code == 404
+        home = c.get("/")
+        assert home.status_code == 200 and 'rel="icon" href="/favicon.ico"' in home.text and "<script" not in home.text
+        assert "img-src 'self'" in home.headers["content-security-policy"] and home.headers["x-frame-options"] == "DENY"
     icons = A.build_mcp(env.state).icons
     assert [i.src for i in icons] == [f"{BASE}/icon.png", f"{BASE}/icon.svg"]
 
