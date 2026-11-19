@@ -19,7 +19,11 @@ mkdir -p "$RUN" && chmod 700 data/server "$RUN" 2>/dev/null
 
 if [ -f .env ]; then
   while IFS= read -r line; do
-    case "$line" in SO_*=*) export "$line" ;; esac
+    case "$line" in
+      SO_*=*)
+        value="${line#*=}"; value="${value%\"}"; value="${value#\"}"; value="${value%\'}"; value="${value#\'}"
+        export "${line%%=*}=$value" ;;
+    esac
   done < .env
 fi
 PORT="${SO_PORT:-$PORT_DEFAULT}"
