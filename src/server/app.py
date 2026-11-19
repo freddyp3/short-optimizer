@@ -41,23 +41,27 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import anyio
 import mcp_types as types
+from mcp.server.auth.provider import construct_redirect_uri
+from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import AnyHttpUrl, ConfigDict, TypeAdapter
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from src.server import config, media, tools
+from src.server import config, media, oauth, tools
 from src.server.auth import FailureLimiter, Tokens
 from src.server.jobs import JobRefused, JobRunner, file_sha256
 from src.server.quota import LimitReached, Quota
@@ -254,6 +258,8 @@ class AppState:
     brief: Callable | None = None
     upload_timeout_s: float = UPLOAD_BODY_TIMEOUT_S
     in_flight: set[str] = field(default_factory=set)
+    users: oauth.Users | None = None                       # set together with ``oauth`` when Google sign-in is on
+    oauth: oauth.Provider | None = None
     redeliver: list = field(default_factory=list)          # drafts ``recover`` found cut off; ``deliver`` runs them again
     calls: dict[str, int] = field(default_factory=dict)
     tool_threads: anyio.CapacityLimiter | None = None      # tool calls may wait; they get their own threads
@@ -457,15 +463,22 @@ class McpAuth:
             match = BEARER.fullmatch(header.strip()) if header else None
             presented = match.group(1) if match else ("" if header is None else None)
         found = await anyio.to_thread.run_sync(self.state.tokens.verify, presented) if presented else None
-        if found is None:
+        token_id = found.id if found else None
+        if token_id is None and presented and self.state.oauth is not None:       # not an invite token: a signed-in user?
+            token_id = await anyio.to_thread.run_sync(self.state.oauth.user_of, presented)
+            if token_id:
+                await anyio.to_thread.run_sync(self.state.users.seen, token_id)
+        if token_id is None:
             if self.state.limiter.blocked(addr):   # a valid token is never blocked: clients share egress addresses
                 info.outcome = "blocked"
                 return await Response(status_code=429)(scope, receive, send)
             if presented != "":
                 self.state.limiter.record_failure(addr)
             info.outcome = "unauthorized" if presented else "unauthorized:no_header" if presented == "" else "unauthorized:bad_header"
-            return await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
-        info.token_id = found.id
+            challenge = "Bearer" if self.state.oauth is None else (
+                f'Bearer resource_metadata="{self.state.cfg.PUBLIC_BASE_URL}/.well-known/oauth-protected-resource/mcp"')
+            return await Response(status_code=401, headers={"WWW-Authenticate": challenge})(scope, receive, send)
+        info.token_id = token_id
         if scope["method"] != "POST":
             info.outcome = "method_not_allowed"
             return await Response(status_code=405, headers={"Allow": "POST"})(scope, receive, send)
@@ -862,6 +875,130 @@ def upload_routes(state: AppState) -> list[Route]:
     return [Route("/u/{upload_id:path}", show, methods=["GET"]), Route("/u/{upload_id:path}", receive, methods=["POST"])]
 
 
+# ---------------------------------------------------------------------------------------------------------- sign-in
+
+MSG_SIGN_IN_GONE = "This sign-in has expired or was already used. Go back to the chat and connect again."
+MSG_GOOGLE_FAILED = "Google could not confirm your account. Go back to the chat and connect again."
+MSG_BLOCKED = "This account cannot use Shorts Pre-Publish Copilot."
+MSG_WAITING = ("Your request is in. You can use Shorts Pre-Publish Copilot once it has been approved; then go back "
+               "to the chat and connect again.")
+MAX_CONSENT_BODY = 4096
+
+
+def sign_in_page(status: int, title: str, inner: str, form_origin: str | None = None) -> Response:
+    """A page of the sign-in flow, in the look of the upload pages. ``inner`` is trusted HTML (escape what goes
+    into it); ``form_origin`` is the one other origin the page's form may redirect to."""
+    body = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>'
+            f'<style>{STYLE}</style></head><body><main class="card"><h1>{html.escape(title)}</h1>{inner}</main></body></html>')
+    headers = dict(SECURITY_HEADERS)
+    if form_origin:
+        headers["Content-Security-Policy"] = headers["Content-Security-Policy"].replace(
+            "form-action 'self'", f"form-action 'self' {form_origin}")
+    return Response(body, status_code=status, media_type="text/html; charset=utf-8", headers=headers)
+
+
+def _note(text: str) -> str:
+    return f'<p class="note">{html.escape(text, quote=False)}</p>'
+
+
+def sign_in_routes(state: AppState) -> list[Route]:
+    """Google's return address and the consent step. The SDK's ``/authorize`` sent the user to Google; here the
+    user becomes a row in ``users`` and, once approved and after a click, the client gets its authorization code."""
+    provider, users, thread = state.oauth, state.users, anyio.to_thread.run_sync
+
+    def back_to_client(params, **query) -> Response:
+        return RedirectResponse(construct_redirect_uri(str(params.redirect_uri), state=params.state, **query), status_code=302,
+                                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+    async def callback(request: Request) -> Response:
+        info: RequestInfo = request.scope["so"]
+        info.route = oauth.CALLBACK_PATH
+        q = request.query_params
+        pending = await thread(provider.take_pending, q.get("state", "")[:200])
+        if pending is None:
+            info.outcome = "bad_state"
+            return sign_in_page(400, "Sign-in expired", _note(MSG_SIGN_IN_GONE))
+        client_id, params = pending
+        if q.get("error") or not q.get("code"):
+            info.outcome = "denied_at_google"
+            return back_to_client(params, error="access_denied")
+        try:
+            who = await thread(provider.google.identify, q["code"][:2000])
+        except oauth.IdentityError:
+            info.outcome = "identity_failed"
+            return sign_in_page(502, "Sign-in failed", _note(MSG_GOOGLE_FAILED))
+        user, new = await thread(users.sign_in, who)
+        info.token_id = user.id
+        info.outcome = ("signup:" if new else "sign_in:") + user.status
+        if user.status == "blocked":
+            return sign_in_page(403, "No access", _note(MSG_BLOCKED))
+        if user.status == "pending":
+            return sign_in_page(200, "Waiting for approval", _note(f"Signed in as {user.email}.") + _note(MSG_WAITING))
+        client = await provider.get_client(client_id)
+        if client is None:
+            info.outcome = "bad_state"
+            return sign_in_page(400, "Sign-in expired", _note(MSG_SIGN_IN_GONE))
+        ticket = await thread(provider.offer_consent, client_id, params, user.id)
+        target = urlsplit(str(params.redirect_uri))
+        name = " ".join(str(client.client_name or "An app").split())[:60]
+        inner = (_note(f"Signed in as {user.email}.")
+                 + _note(f"{name} (it returns to {target.netloc or target.scheme}) will be able to check your draft Shorts "
+                         "and read the results.")
+                 + f'<form method="post" action="{oauth.CONSENT_PATH}">'
+                 f'<input type="hidden" name="ticket" value="{html.escape(ticket)}">'
+                 '<button class="go" name="choice" value="allow">Allow</button>'
+                 '<button class="back" name="choice" value="deny">Cancel</button></form>')
+        return sign_in_page(200, "Connect to Shorts Pre-Publish Copilot?", inner,
+                            form_origin=f"{target.scheme}://{target.netloc}" if target.netloc else f"{target.scheme}:")
+
+    async def consent(request: Request) -> Response:
+        info: RequestInfo = request.scope["so"]
+        info.route = oauth.CONSENT_PATH
+        declared = request.headers.get("content-length", "")
+        body = await request.body() if declared.isdigit() and int(declared) <= MAX_CONSENT_BODY else b""
+        fields = parse_qs(body.decode("utf-8", "replace")) if len(body) <= MAX_CONSENT_BODY else {}
+        taken = await thread(provider.take_consent, (fields.get("ticket") or [""])[0][:200])
+        if taken is None:
+            info.outcome = "bad_ticket"
+            return sign_in_page(400, "Sign-in expired", _note(MSG_SIGN_IN_GONE))
+        client_id, params, user_id = taken
+        info.token_id = user_id
+        if (fields.get("choice") or [""])[0] != "allow":
+            info.outcome = "denied"
+            return back_to_client(params, error="access_denied")
+        info.outcome = "allowed"
+        return back_to_client(params, code=await thread(provider.issue_code, client_id, params, user_id))
+
+    return [Route(oauth.CALLBACK_PATH, callback, methods=["GET"]), Route(oauth.CONSENT_PATH, consent, methods=["POST"])]
+
+
+class _Labelled:
+    """Gives the SDK's OAuth endpoints a route name in the request log."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if "so" in scope:
+            scope["so"].route = "/oauth"
+        await self.app(scope, receive, send)
+
+
+def oauth_routes(state: AppState) -> list[Route]:
+    """Everything a client needs to sign a user in: discovery documents, registration, authorize, token, revoke
+    (all from the MCP SDK, backed by ``oauth.Provider``) and the two pages above."""
+    base = state.cfg.PUBLIC_BASE_URL
+    issuer = TypeAdapter(AnyHttpUrl, config=ConfigDict(url_preserve_empty_path=True)).validate_python(base)
+    sdk = create_auth_routes(state.oauth, issuer_url=issuer, client_registration_options=ClientRegistrationOptions(enabled=True),
+                             revocation_options=RevocationOptions(enabled=True))
+    sdk += create_protected_resource_routes(resource_url=AnyHttpUrl(f"{base}/mcp"), authorization_servers=[issuer],
+                                            resource_name="Shorts Pre-Publish Copilot")
+    for route in sdk:
+        route.app = _Labelled(route.app)
+    return [*sdk, *sign_in_routes(state)]
+
+
 ASSETS = Path(__file__).parent / "assets"
 ICON_FILES = {"/icon.png": ("icon.png", "image/png"), "/apple-touch-icon.png": ("icon.png", "image/png"),
               "/icon.svg": ("icon.svg", "image/svg+xml"), "/favicon.svg": ("icon.svg", "image/svg+xml"),
@@ -914,9 +1051,12 @@ class Body:
 def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Callable[[], object] | None = None,
               similar: Callable | None = None, brief: Callable | None = None, clock: Callable[[], float] = time.time,
               allow_path_token: bool = False, allow_insecure_local: bool = False,
-              upload_timeout_s: float = UPLOAD_BODY_TIMEOUT_S, purge_every_s: float = PURGE_EVERY_S) -> RequestLog:
+              upload_timeout_s: float = UPLOAD_BODY_TIMEOUT_S, purge_every_s: float = PURGE_EVERY_S,
+              google: oauth.Google | None = None, auto_approve: tuple[str, ...] = ()) -> RequestLog:
     """The ASGI app. ``analyze`` replaces ``analyze_draft``; ``warm`` loads the library in a background thread
     (None: nothing to load, ready at once); ``similar`` / ``brief`` replace the functions of ``audience.brief``.
+    ``google`` turns sign-in on (``oauth``): users connect with their Google account next to the invite tokens,
+    and the addresses in ``auto_approve`` need no approval.
     Start-up recovery, the first purge and the warm-up run when the app's lifespan starts."""
     check_public_url(cfg.PUBLIC_BASE_URL, allow_insecure_local)
     ready = threading.Event()
@@ -929,6 +1069,9 @@ def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Call
                      limiter=FailureLimiter(cfg.BAD_TOKEN_MAX, cfg.BAD_TOKEN_WINDOW_S, clock),
                      starts=tools.StartLimiter(cfg.DB_PATH, clock), runner=runner, refusals=tools.Refusals(), ready=ready,
                      similar=similar, brief=brief, upload_timeout_s=upload_timeout_s)
+    if google is not None:
+        state.users = oauth.Users(cfg.DB_PATH, clock, auto_approve)
+        state.oauth = oauth.Provider(cfg.DB_PATH, state.users, google, clock)
     public = urlsplit(cfg.PUBLIC_BASE_URL)
     origin = f"{public.scheme}://{public.netloc}"
     manager = StreamableHTTPSessionManager(
@@ -971,6 +1114,8 @@ def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Call
                 runner.shutdown(wait=False)
 
     routes = [Route("/mcp", endpoint=McpAuth(state, manager.handle_request)), *upload_routes(state), *icon_routes()]
+    if state.oauth is not None:
+        routes += oauth_routes(state)
     if allow_path_token:
         routes.append(Route("/t/{token}/mcp", endpoint=McpAuth(state, manager.handle_request, path_token=True)))
     return RequestLog(Starlette(debug=False, routes=routes, lifespan=lifespan), state)
@@ -1050,6 +1195,13 @@ def _real_warm() -> None:
     tool.state()
 
 
+def google_from_env(env: Mapping[str, str], cfg: config.Config) -> oauth.Google | None:
+    """Google sign-in is on when both ``SO_GOOGLE_CLIENT_ID`` and ``SO_GOOGLE_CLIENT_SECRET`` are set (environment
+    or .env). The redirect address to register with Google is ``<public address>/oauth/google/callback``."""
+    client_id, secret = env.get("SO_GOOGLE_CLIENT_ID", "").strip(), env.get("SO_GOOGLE_CLIENT_SECRET", "").strip()
+    return oauth.Google(client_id, secret, cfg.PUBLIC_BASE_URL + oauth.CALLBACK_PATH) if client_id and secret else None
+
+
 def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
@@ -1072,6 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
     except (StartupError, config.ConfigError) as exc:
         print(f"cannot start: {exc}", file=sys.stderr)
         return 2
+    google, approve = google_from_env(os.environ, cfg), tuple(os.environ.get("SO_AUTO_APPROVE_EMAILS", "").split(","))
     fake = opts.fake_analysis
     if fake:
         from src.tools.audience import brief
@@ -1079,9 +1232,10 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("%s FAKE ANALYSIS is on: results are canned, nothing is sent to Gemini", _stamp())
     app = build_app(cfg, analyze=fake_analyze if fake else None, warm=None if fake else _real_warm,
                     similar=fake_similar if fake else None, brief=brief.audience_brief if fake else None,
-                    allow_path_token=opts.allow_path_token, allow_insecure_local=opts.allow_insecure_local)
-    log.info("%s listening on %s:%d public=%s path_token=%s", _stamp(), HOST, opts.port, cfg.PUBLIC_BASE_URL,
-             opts.allow_path_token)
+                    allow_path_token=opts.allow_path_token, allow_insecure_local=opts.allow_insecure_local,
+                    google=google, auto_approve=approve)
+    log.info("%s listening on %s:%d public=%s path_token=%s google_sign_in=%s", _stamp(), HOST, opts.port,
+             cfg.PUBLIC_BASE_URL, opts.allow_path_token, google is not None)
     uvicorn.run(app, host=HOST, port=opts.port, access_log=False, log_level="warning", server_header=False,
                 proxy_headers=False, timeout_graceful_shutdown=5)
     return 0
