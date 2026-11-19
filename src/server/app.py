@@ -593,15 +593,13 @@ STYLE = (
     ".reqs ul{margin:.35rem 0 0;padding-left:1.2rem}.reqs li{margin:.15rem 0}.reqs li::marker{color:var(--accent)}"
     ".note{margin:.55rem 0 0;color:var(--soft);font-size:.84rem}"
     "button{font:inherit;cursor:pointer}"
-    ".back{margin:0 0 1rem;padding:0;border:0;background:none;color:var(--accent);font-size:.95rem;font-weight:600}"
-    ".back:hover{color:var(--accent-text)}"
     ".opts{margin-top:1rem;border:1px solid var(--border);border-radius:10px;overflow:hidden}"
     ".opt{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;width:100%;padding:.95rem 1rem;"
     "text-align:left;color:var(--ink);background:var(--card);border:0;font-size:1rem;font-weight:600;"
     "letter-spacing:-.01em;transition:background-color .15s}.opt+.opt{border-top:1px solid var(--border)}"
     ".opt:hover{background:var(--accent-bg)}.opt:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}"
     ".opt span{color:var(--soft);font-size:.88rem;font-weight:400;letter-spacing:0}"
-    ".go{width:100%;margin-top:1.5rem;padding:.8rem 1.2rem;font-size:1rem;font-weight:600;border:0;"
+    ".go{width:100%;margin-top:1.6rem;padding:.8rem 1.2rem;font-size:1rem;font-weight:600;border:0;"
     "border-radius:10px;color:#fff;background:var(--accent);transition:background-color .15s}"
     ".go:hover{background:#ea580c}.go:focus-visible{outline:2px solid var(--accent-soft);outline-offset:2px}"
     ".msg{margin:.6rem 0 0;font-weight:600;font-size:.95rem}.msg.bad{color:#e11d48}"
@@ -618,6 +616,11 @@ STYLE = (
     "@keyframes pop{from{transform:scale(0);opacity:0}}@keyframes draw{from{stroke-dashoffset:40}}"
     "@keyframes rise{from{opacity:0;transform:translateY(6px)}}"
     ".foot{margin:1.1rem 0 0;color:var(--muted);font-size:.8rem}"
+    ".lede{margin:.7rem 0 0;color:var(--soft);font-size:.97rem}.lede b{color:var(--ink);font-weight:600}"
+    ".actions{display:flex;gap:.6rem;margin-top:1.6rem}.actions button{flex:1;margin:0}input[type=hidden]{display:none}"
+    ".quiet{padding:.8rem 1.2rem;font-size:1rem;font-weight:600;border:1px solid var(--border);border-radius:10px;"
+    "color:var(--ink);background:var(--card);transition:background-color .15s}.quiet:hover{background:var(--dim)}"
+    ".quiet:focus-visible{outline:2px solid var(--accent-soft);outline-offset:2px}"
     "@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}")
 DONE_MARK = ('<svg width="76" height="76" viewBox="0 0 72 72" aria-hidden="true"><circle class="ring" cx="36" cy="36" r="30"/>'
              '<circle class="disc" cx="36" cy="36" r="30"/><path class="tick" d="M24 37l8.5 8.5L49 28"/></svg>')
@@ -645,7 +648,8 @@ def _form(cfg: config.Config, pay: str | None = None) -> str:
         '<label for="video">Video file</label>'
         '<input id="video" name="video" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" required>'
         '<div class="reqs"><p>Make sure it is:</p><ul>' + "".join(f"<li>{html.escape(r)}</li>" for r in reqs) + "</ul></div>"
-        + key + '<button class="go" type="submit">Upload</button></form>')
+        + key + '<div class="actions"><button class="quiet" form="back" formnovalidate>Back</button>'
+        '<button class="go" type="submit">Upload</button></div></form>')
 
 
 def page(status: int, message: str | None = None, form: str | None = None, extra: str | None = None,
@@ -656,7 +660,7 @@ def page(status: int, message: str | None = None, form: str | None = None, extra
     if message and status < 300:
         main = f'<div class="done">{DONE_MARK}<p class="msg">{said}</p></div>'
     else:
-        main = (('<form method="get"><button class="back">&lsaquo; Back</button></form>' if back else "")
+        main = (('<form method="get" id="back"></form>' if back else "")
                 + f"<h1>{title}</h1>" + (f'<p class="msg bad">{said}</p>' if message else "")
                 + (f'<p class="note">{html.escape(extra, quote=False)}</p>' if extra else "") + (form or ""))
     body = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -904,7 +908,11 @@ def sign_in_page(status: int, title: str, inner: str, form_origin: str | None = 
 
 
 def _note(text: str) -> str:
-    return f'<p class="note">{html.escape(text, quote=False)}</p>'
+    return f'<p class="lede">{html.escape(text, quote=False)}</p>'
+
+
+def _signed_in(email: str) -> str:
+    return f'<p class="lede">Signed in as <b>{html.escape(email, quote=False)}</b>.</p>'
 
 
 def sign_in_routes(state: AppState) -> list[Route]:
@@ -939,7 +947,7 @@ def sign_in_routes(state: AppState) -> list[Route]:
         if user.status == "blocked":
             return sign_in_page(403, "No access", _note(MSG_BLOCKED))
         if user.status == "pending":
-            return sign_in_page(200, "Waiting for approval", _note(f"Signed in as {user.email}.") + _note(MSG_WAITING))
+            return sign_in_page(200, "Waiting for approval", _signed_in(user.email) + _note(MSG_WAITING))
         client = await provider.get_client(client_id)
         if client is None:
             info.outcome = "bad_state"
@@ -947,14 +955,14 @@ def sign_in_routes(state: AppState) -> list[Route]:
         ticket = await thread(provider.offer_consent, client_id, params, user.id)
         target = urlsplit(str(params.redirect_uri))
         name = " ".join(str(client.client_name or "An app").split())[:60]
-        inner = (_note(f"Signed in as {user.email}.")
-                 + _note(f"{name} (it returns to {target.netloc or target.scheme}) will be able to check your draft Shorts "
-                         "and read the results.")
-                 + f'<form method="post" action="{oauth.CONSENT_PATH}">'
+        inner = (_note(f"{name} will be able to check your draft Shorts and read the results. "
+                       f"After you allow it, you go back to {target.netloc or target.scheme}.")
+                 + _signed_in(user.email)
+                 + f'<form method="post" action="{oauth.CONSENT_PATH}" class="actions">'
                  f'<input type="hidden" name="ticket" value="{html.escape(ticket)}">'
-                 '<button class="go" name="choice" value="allow">Allow</button>'
-                 '<button class="back" name="choice" value="deny">Cancel</button></form>')
-        return sign_in_page(200, "Connect to Shorts Pre-Publish Copilot?", inner,
+                 '<button class="quiet" name="choice" value="deny">Cancel</button>'
+                 '<button class="go" name="choice" value="allow">Allow</button></form>')
+        return sign_in_page(200, "Connect Shorts Pre-Publish Copilot?", inner,
                             form_origin=f"{target.scheme}://{target.netloc}" if target.netloc else f"{target.scheme}:")
 
     async def consent(request: Request) -> Response:
