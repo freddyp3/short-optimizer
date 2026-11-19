@@ -57,6 +57,15 @@ class JobRefused(Exception):
         super().__init__(kind)
 
 
+class RemoteFailure(Exception):
+    """A review that ran somewhere else (the Cloud Run job) and failed there. ``code`` and ``user_message`` were
+    chosen there by ``failure``, so the message is one of the fixed, safe sentences."""
+
+    def __init__(self, code: str, user_message: str):
+        self.code, self.user_message = str(code), str(user_message)
+        super().__init__(self.code)
+
+
 def _chain(exc: BaseException) -> list[BaseException]:
     out: list[BaseException] = []
     while exc is not None and exc not in out and len(out) < 10:
@@ -79,7 +88,7 @@ def key_problem(exc: BaseException) -> bool:
 
 def failure(exc: BaseException, paid_by: str) -> tuple[str, str]:
     """(code, sentence) stored for a failed job. Chosen by error class only; never the error's own text."""
-    if isinstance(exc, Rejected):
+    if isinstance(exc, (Rejected, RemoteFailure)):
         return exc.code, exc.user_message
     if isinstance(exc, BudgetExceeded):
         return "over_budget", MSG_BUDGET
@@ -100,10 +109,11 @@ def file_sha256(path: Path | str) -> str:
 class Checkpoint:
     """The finished stages of one review, kept under its video hash. ``get(stage)`` is the kept output or None;
     ``put(stage, value)`` keeps a JSON value. A stage that cannot be kept is only run again on a retry, so a
-    failing ``put`` never fails the job."""
+    failing ``put`` never fails the job. It also carries the review's identity (``draft_id``, ``video_sha256``)
+    and what earlier deliveries recorded as spent, for an analysis that runs the review somewhere else."""
 
-    def __init__(self, store: Store, draft_id: str, video_sha256: str):
-        self.store, self.draft_id, self.video_sha256 = store, draft_id, video_sha256
+    def __init__(self, store: Store, draft_id: str, video_sha256: str, already_spent: float = 0.0):
+        self.store, self.draft_id, self.video_sha256, self.already_spent = store, draft_id, video_sha256, already_spent
         self._kept = store.stages(draft_id, video_sha256)
 
     def get(self, stage: str):
@@ -221,7 +231,7 @@ class JobRunner:
         extra = {}
         if self._checkpointed and video_sha256 and paid_by == "server":
             try:
-                extra["checkpoint"] = Checkpoint(self.store, draft_id, video_sha256)
+                extra["checkpoint"] = Checkpoint(self.store, draft_id, video_sha256, float(already_spent))
             except Exception as inner:
                 log.warning("could not read kept stages class=%s", type(inner).__name__)
 

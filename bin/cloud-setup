@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Create (or confirm) the Google Cloud resources the reviews run on. Safe to run again: existing things are kept.
+#
+#   bin/cloud-setup
+#
+# Needs gcloud logged in as an owner of the project. Everything is in one region and sized for the free tiers:
+#   Cloud Storage bucket    uploaded videos, kept stages and results of running reviews; objects deleted after a day
+#   Artifact Registry repo  the container image of the review job
+#   Cloud Tasks queue       one task per review, named after the video's hash; retries with backoff
+#   Secret Manager secret   the server's Gemini key, read only by the review job
+#   service accounts        so-job (runs the review), so-tasks (lets Cloud Tasks start the job), so-server (the MCP server)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+PROJECT="${SO_GCP_PROJECT:-short-optimizer}"
+REGION="${SO_GCP_REGION:-us-west1}"
+NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+BUCKET="${SO_GCP_BUCKET:-$PROJECT-reviews-$NUMBER}"
+REPO=short-optimizer QUEUE=reviews SECRET=gemini-api-key-paid JOB=review
+g() { gcloud --project "$PROJECT" --quiet "$@"; }
+have() { "$@" >/dev/null 2>&1; }
+sa() { echo "$1@$PROJECT.iam.gserviceaccount.com"; }
+
+echo "project $PROJECT ($NUMBER), region $REGION"
+
+have g storage buckets describe "gs://$BUCKET" || g storage buckets create "gs://$BUCKET" --location "$REGION" \
+  --uniform-bucket-level-access --public-access-prevention --soft-delete-duration=0
+printf '{"rule":[{"action":{"type":"Delete"},"condition":{"age":1}}]}' > /tmp/so_lifecycle.json
+g storage buckets update "gs://$BUCKET" --lifecycle-file=/tmp/so_lifecycle.json >/dev/null
+echo "bucket gs://$BUCKET (objects deleted after 1 day)"
+
+have g artifacts repositories describe "$REPO" --location "$REGION" || g artifacts repositories create "$REPO" \
+  --location "$REGION" --repository-format docker --description "Review job image"
+echo "registry $REGION-docker.pkg.dev/$PROJECT/$REPO"
+
+have g tasks queues describe "$QUEUE" --location "$REGION" || g tasks queues create "$QUEUE" --location "$REGION"
+g tasks queues update "$QUEUE" --location "$REGION" --max-attempts 5 --min-backoff 10s --max-backoff 120s \
+  --max-concurrent-dispatches 2 --max-dispatches-per-second 1 >/dev/null
+echo "queue $QUEUE (5 attempts, at most 2 at a time)"
+
+for name in so-job so-tasks so-server; do
+  have g iam service-accounts describe "$(sa $name)" || g iam service-accounts create "$name" --display-name "short-optimizer $name"
+done
+bind_bucket() { g storage buckets add-iam-policy-binding "gs://$BUCKET" --member "serviceAccount:$(sa $1)" --role roles/storage.objectAdmin >/dev/null; }
+bind_bucket so-job
+bind_bucket so-server
+g tasks queues add-iam-policy-binding "$QUEUE" --location "$REGION" --member "serviceAccount:$(sa so-server)" \
+  --role roles/cloudtasks.enqueuer >/dev/null
+g iam service-accounts add-iam-policy-binding "$(sa so-tasks)" --member "serviceAccount:$(sa so-server)" \
+  --role roles/iam.serviceAccountUser >/dev/null
+echo "service accounts so-job, so-tasks, so-server"
+
+if ! have g secrets describe "$SECRET"; then
+  key="$(grep -E '^GEMINI_API_KEY_PAID=' .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')"
+  [ -n "$key" ] || { echo "GEMINI_API_KEY_PAID is not in .env"; exit 1; }
+  printf '%s' "$key" | g secrets create "$SECRET" --replication-policy user-managed --locations "$REGION" --data-file=- >/dev/null
+fi
+g secrets add-iam-policy-binding "$SECRET" --member "serviceAccount:$(sa so-job)" --role roles/secretmanager.secretAccessor >/dev/null
+echo "secret $SECRET (readable by so-job only)"
+
+if have g run jobs describe "$JOB" --region "$REGION"; then
+  g run jobs add-iam-policy-binding "$JOB" --region "$REGION" --member "serviceAccount:$(sa so-tasks)" \
+    --role roles/run.jobsExecutorWithOverrides >/dev/null
+  echo "job $JOB can be started by so-tasks"
+else
+  echo "job $JOB is not deployed yet: run bin/cloud-deploy, then this script again"
+fi
+
+mkdir -p secrets
+if [ ! -f secrets/gcp_server_sa.json ]; then
+  g iam service-accounts keys create secrets/gcp_server_sa.json --iam-account "$(sa so-server)" >/dev/null
+  chmod 600 secrets/gcp_server_sa.json
+  echo "key for so-server written to secrets/gcp_server_sa.json (gitignored)"
+fi
+cat <<OUT
+
+Settings for .env:
+SO_GCP_PROJECT=$PROJECT
+SO_GCP_REGION=$REGION
+SO_GCP_BUCKET=$BUCKET
+SO_GCP_QUEUE=$QUEUE
+SO_GCP_JOB=$JOB
+SO_GCP_TASKS_SA=$(sa so-tasks)
+SO_GCP_CREDENTIALS=secrets/gcp_server_sa.json
+OUT

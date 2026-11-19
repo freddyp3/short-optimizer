@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Build the review job's image with Cloud Build and deploy it as the Cloud Run job.
+#
+#   bin/cloud-deploy            build and deploy
+#   bin/cloud-deploy --fake     deploy with canned analysis (no Gemini call), for testing the plumbing
+#
+# Run bin/cloud-setup first (and once more after the first deploy, so Cloud Tasks may start the job).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+PROJECT="${SO_GCP_PROJECT:-short-optimizer}"
+REGION="${SO_GCP_REGION:-us-west1}"
+NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+BUCKET="${SO_GCP_BUCKET:-$PROJECT-reviews-$NUMBER}"
+IMAGE="$REGION-docker.pkg.dev/$PROJECT/short-optimizer/review:latest"
+FAKE=0; [ "${1:-}" = "--fake" ] && FAKE=1
+
+if [ "${SO_SKIP_BUILD:-0}" != "1" ]; then
+  ./venv/bin/python -m src.cloud.stage build/review_job
+  gcloud --project "$PROJECT" builds submit build/review_job --tag "$IMAGE" --timeout 1800 --quiet
+fi
+gcloud --project "$PROJECT" --quiet run jobs deploy review --image "$IMAGE" --region "$REGION" \
+  --service-account "so-job@$PROJECT.iam.gserviceaccount.com" --cpu 2 --memory 4Gi --task-timeout 900 --max-retries 1 \
+  --set-env-vars "SO_GCP_BUCKET=$BUCKET,SO_MAX_RETRIES=1,SO_FAKE_ANALYSIS=$FAKE" \
+  --set-secrets "GEMINI_API_KEY_PAID=gemini-api-key-paid:latest"
+echo "deployed job 'review' ($([ "$FAKE" = 1 ] && echo 'canned analysis' || echo 'real analysis')) from $IMAGE"

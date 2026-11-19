@@ -16,6 +16,11 @@ Environment, besides the ``SO_*`` settings of ``config.py`` (SO_PUBLIC_BASE_URL 
     SO_ALLOW_INSECURE_LOCAL=1  accept http://127.0.0.1:PORT (or localhost) as the public address, for local tests
     SO_FAKE_ANALYSIS=1         canned analysis instead of Gemini and the library; only with a local public address
     GEMINI_API_KEY_PAID        the server's Gemini key (read from the environment or .env; not needed when faked)
+    SO_GOOGLE_CLIENT_ID, SO_GOOGLE_CLIENT_SECRET, SO_AUTO_APPROVE_EMAILS
+                               Google sign-in next to the invite tokens (``oauth.py``)
+    SO_GCP_JOB and the other SO_GCP_* settings
+                               run each server-paid review as a Cloud Run job started through Cloud Tasks
+                               (``src/cloud/dispatch.py``) instead of in this process
 HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set by the server itself at start-up (the embedding model must
 already be in the local Hugging Face cache).
 
@@ -1236,7 +1241,14 @@ def main(argv: list[str] | None = None) -> int:
             if not os.environ.get("GEMINI_API_KEY_PAID", "").strip():
                 raise StartupError("GEMINI_API_KEY_PAID is not set (environment or .env)")
         check_binaries()
-    except (StartupError, config.ConfigError) as exc:
+        cloud = None
+        if not opts.fake_analysis:
+            from src.cloud import dispatch
+            from src.server.jobs import _default_analyze
+
+            cloud = dispatch.from_env(os.environ, local_analyze=_default_analyze,
+                                      budget_usd=cfg.BUDGET_FACTOR * cfg.EST_COST_PER_DRAFT_USD)
+    except (StartupError, config.ConfigError, ValueError, OSError) as exc:
         print(f"cannot start: {exc}", file=sys.stderr)
         return 2
     google, approve = google_from_env(os.environ, cfg), tuple(os.environ.get("SO_AUTO_APPROVE_EMAILS", "").split(","))
@@ -1245,12 +1257,12 @@ def main(argv: list[str] | None = None) -> int:
         from src.tools.audience import brief
 
         log.warning("%s FAKE ANALYSIS is on: results are canned, nothing is sent to Gemini", _stamp())
-    app = build_app(cfg, analyze=fake_analyze if fake else None, warm=None if fake else _real_warm,
+    app = build_app(cfg, analyze=fake_analyze if fake else cloud.analyze if cloud else None, warm=None if fake else _real_warm,
                     similar=fake_similar if fake else None, brief=brief.audience_brief if fake else None,
                     allow_path_token=opts.allow_path_token, allow_insecure_local=opts.allow_insecure_local,
                     google=google, auto_approve=approve)
-    log.info("%s listening on %s:%d public=%s path_token=%s google_sign_in=%s", _stamp(), HOST, opts.port,
-             cfg.PUBLIC_BASE_URL, opts.allow_path_token, google is not None)
+    log.info("%s listening on %s:%d public=%s path_token=%s google_sign_in=%s reviews=%s", _stamp(), HOST, opts.port,
+             cfg.PUBLIC_BASE_URL, opts.allow_path_token, google is not None, "cloud_run" if cloud else "fake" if fake else "local")
     uvicorn.run(app, host=HOST, port=opts.port, access_log=False, log_level="warning", server_header=False,
                 proxy_headers=False, timeout_graceful_shutdown=5)
     return 0
