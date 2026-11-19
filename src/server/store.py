@@ -7,6 +7,10 @@ A draft goes ``waiting_for_upload`` -> ``processing`` -> ``done`` | ``failed``, 
 link is a one-time capability: ``claim_upload`` marks it used (``claimed_at``) without changing the status,
 ``release_upload`` re-opens it after a refused file, ``start_processing`` needs a claimed draft.
 
+A review is keyed on the hash of its video (``video_sha256``, set by ``start_processing``). A review cut off by
+a restart is delivered again (``redeliver_interrupted``) instead of failed, and what its finished stages produced
+is kept in ``review_stages`` under that key, so a retry never repeats a stage that already ran.
+
 The store never touches files. ``artifacts`` is JSON (any file reference in it must be relative to the server's
 data directory) and ``purge`` reports what it removed so the caller can delete the matching files.
 """
@@ -49,12 +53,22 @@ CREATE TABLE IF NOT EXISTS drafts (
     result_json TEXT,
     artifacts_json TEXT,
     started_at REAL,
-    finished_at REAL
+    finished_at REAL,
+    video_sha256 TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS drafts_token_status ON drafts (token_id, status);
+CREATE TABLE IF NOT EXISTS review_stages (
+    video_sha256 TEXT NOT NULL,
+    draft_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    PRIMARY KEY (video_sha256, draft_id, stage)
+);
 """
 _COLUMNS = ("id, token_id, upload_id, created_at, upload_expires_at, claimed_at, status, step, fail_code, "
-            "fail_message, paid_by, cost_usd, result_json, artifacts_json, started_at, finished_at")
+            "fail_message, paid_by, cost_usd, result_json, artifacts_json, started_at, finished_at, video_sha256, attempts")
+MSG_INTERRUPTED = "The analysis was interrupted. Please start a new draft."
 
 
 class UploadUnavailable(Exception):
@@ -83,6 +97,8 @@ class Draft:
     artifacts: dict | None
     started_at: float | None
     finished_at: float | None
+    video_sha256: str | None = None
+    attempts: int = 0
 
 
 def connect(db_path: Path | str) -> sqlite3.Connection:
@@ -133,6 +149,11 @@ class Store:
         self.db_path, self.clock = Path(db_path), clock
         self.upload_ttl_s, self.result_ttl_s, self.job_stale_s = upload_ttl_s, result_ttl_s, job_stale_s
         init_schema(self.db_path, SCHEMA)
+        with transaction(self.db_path) as con:          # databases created before reviews were keyed on the video
+            have = {row[1] for row in con.execute("PRAGMA table_info(drafts)")}
+            for column, kind in (("video_sha256", "TEXT"), ("attempts", "INTEGER NOT NULL DEFAULT 0")):
+                if column not in have:
+                    con.execute(f"ALTER TABLE drafts ADD COLUMN {column} {kind}")
 
     def _one(self, con: sqlite3.Connection, where: str, args: tuple) -> Draft | None:
         row = con.execute(f"SELECT {_COLUMNS} FROM drafts WHERE {where}", args).fetchone()
@@ -192,13 +213,56 @@ class Store:
         return self._update("UPDATE drafts SET claimed_at = NULL WHERE id = ? AND status = ? AND claimed_at IS NOT NULL",
                             (draft_id, WAITING))
 
-    def start_processing(self, draft_id: str, paid_by: str) -> None:
-        """Claimed draft -> processing. Raises DraftStateError if it was not claimed or is no longer waiting."""
+    def start_processing(self, draft_id: str, paid_by: str, video_sha256: str | None = None) -> None:
+        """Claimed draft -> processing, as the first delivery of its review. ``video_sha256`` is the review's key;
+        without it the review cannot be delivered again. Raises DraftStateError if the draft was not claimed or is
+        no longer waiting."""
         if paid_by not in PAID_BY:
             raise ValueError(f"paid_by must be one of {PAID_BY}")
-        if not self._update("UPDATE drafts SET status = ?, paid_by = ?, started_at = ?, step = NULL WHERE id = ? "
-                            "AND status = ? AND claimed_at IS NOT NULL", (PROCESSING, paid_by, self.clock(), draft_id, WAITING)):
+        if not self._update("UPDATE drafts SET status = ?, paid_by = ?, started_at = ?, step = NULL, video_sha256 = ?, "
+                            "attempts = 1 WHERE id = ? AND status = ? AND claimed_at IS NOT NULL",
+                            (PROCESSING, paid_by, self.clock(), video_sha256, draft_id, WAITING)):
             raise DraftStateError("draft is not waiting with a claimed upload")
+
+    def redeliver_interrupted(self, max_attempts: int = config.MAX_JOB_ATTEMPTS) -> tuple[list[Draft], list[str]]:
+        """Start-up, before any job runs: every draft a dead process left in ``processing`` is either delivered
+        again or failed. Returns ``(drafts to run again, ids that were failed)``.
+
+        Delivered again: a server-paid review with a video hash that has deliveries left; its attempt count goes up
+        and its clock restarts. Failed as ``interrupted``: an own-key review (the key was never stored, so nobody
+        can run it again), a review without a hash, and one that has used all its deliveries."""
+        now = self.clock()
+        with transaction(self.db_path) as con:
+            rows = con.execute("SELECT id, paid_by, video_sha256, attempts FROM drafts WHERE status = ?", (PROCESSING,)).fetchall()
+            again = [i for i, paid_by, sha, attempts in rows if paid_by == "server" and sha and attempts < max_attempts]
+            failed = [r[0] for r in rows if r[0] not in again]
+            con.executemany("UPDATE drafts SET attempts = attempts + 1, started_at = ?, step = NULL WHERE id = ?",
+                            [(now, i) for i in again])
+            con.executemany("UPDATE drafts SET status = ?, step = NULL, fail_code = 'interrupted', fail_message = ?, "
+                            "finished_at = ? WHERE id = ?", [(FAILED, MSG_INTERRUPTED, now, i) for i in failed])
+            return [self._one(con, "id = ?", (i,)) for i in again], failed
+
+    def stages(self, draft_id: str, video_sha256: str) -> dict:
+        """What the finished stages of this review produced, by stage name."""
+        con = connect(self.db_path)
+        try:
+            return {stage: json.loads(value) for stage, value in con.execute(
+                "SELECT stage, value_json FROM review_stages WHERE video_sha256 = ? AND draft_id = ?", (video_sha256, draft_id))}
+        finally:
+            con.close()
+
+    def put_stage(self, draft_id: str, video_sha256: str, stage: str, value) -> bool:
+        """Keep the output of a finished stage. The first write wins; False if the stage was already kept."""
+        value_json = json.dumps(value, allow_nan=False)
+        with transaction(self.db_path) as con:
+            return con.execute("INSERT OR IGNORE INTO review_stages (video_sha256, draft_id, stage, value_json) "
+                               "VALUES (?, ?, ?, ?)", (video_sha256, draft_id, str(stage), value_json)).rowcount == 1
+
+    def drop_stages(self) -> int:
+        """Delete the kept stages of every review that is not running any more. Returns how many rows went."""
+        with transaction(self.db_path) as con:
+            return con.execute("DELETE FROM review_stages WHERE draft_id NOT IN (SELECT id FROM drafts WHERE status = ?)",
+                               (PROCESSING,)).rowcount
 
     def set_step(self, draft_id: str, step: str) -> bool:
         return self._update("UPDATE drafts SET step = ? WHERE id = ? AND status = ?",
@@ -237,7 +301,7 @@ class Store:
                                              (PROCESSING, now - older_than_s))]
             con.executemany("UPDATE drafts SET status = ?, step = NULL, fail_code = 'interrupted', fail_message = ?, "
                             "finished_at = ? WHERE id = ?",
-                            [(FAILED, "The analysis was interrupted. Please start a new draft.", now, i) for i in ids])
+                            [(FAILED, MSG_INTERRUPTED, now, i) for i in ids])
             return ids
 
     def purge(self, now: float | None = None) -> dict:

@@ -41,6 +41,7 @@ class Config:
     BUDGET_FACTOR: float = 2.0              # a job is stopped once its recorded cost passes this many estimates
     MAX_JOBS_TOTAL: int = 2
     MAX_JOBS_PER_USER: int = 1
+    MAX_JOB_ATTEMPTS: int = 3               # deliveries of one review: the first run plus retries after a restart
     BAD_TOKEN_MAX: int = 10
     BAD_TOKEN_WINDOW_S: int = 600
     PUBLIC_BASE_URL: str | None = None
@@ -66,7 +67,7 @@ class Config:
 
 
 _INT = ("MAX_UPLOAD_BYTES", "UPLOAD_TTL_S", "RESULT_TTL_S", "DRAFTS_PER_DAY", "OWN_KEY_DRAFTS_PER_DAY",
-        "MAX_JOBS_TOTAL", "MAX_JOBS_PER_USER", "BAD_TOKEN_MAX", "BAD_TOKEN_WINDOW_S")
+        "MAX_JOBS_TOTAL", "MAX_JOBS_PER_USER", "MAX_JOB_ATTEMPTS", "BAD_TOKEN_MAX", "BAD_TOKEN_WINDOW_S")
 _FLOAT = ("MIN_DURATION_S", "MAX_DURATION_S", "DAY_CAP_USD", "MONTH_CAP_USD", "EST_COST_PER_DRAFT_USD",
           "BUDGET_FACTOR")
 _PATH = ("DATA_DIR", "UPLOAD_DIR", "DB_PATH")

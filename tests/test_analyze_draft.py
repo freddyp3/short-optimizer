@@ -322,3 +322,38 @@ def test_safe_error():
             raise RuntimeError("outer says nothing")
     except RuntimeError as outer:
         assert str(P.safe_error(outer, KEY)) == "RuntimeError: outer says nothing"
+
+
+class Kept(dict):
+    """A checkpoint that keeps stages in memory, as JSON, like the server's."""
+
+    def put(self, stage, value):
+        self.setdefault(stage, json.loads(json.dumps(value)))
+
+
+def test_a_retry_with_a_checkpoint_makes_no_finished_call_again(env):
+    kept, first, second = Kept(), [], []
+    env.fail_at = "L2"                                   # the first attempt dies in its fourth call
+    with pytest.raises(Exception):
+        P.analyze_draft(env.video, api_key=KEY, on_cost=first.append, checkpoint=kept)
+    assert first == [0.03, 0.04, 0.01] and sorted(kept) == ["extract_v2", "extract_v3", "judge_L0"]
+    assert (len(env.extract_clients), len(env.judge_clients)) == (2, 2)
+    env.fail_at = None
+    out = P.analyze_draft(env.video, api_key=KEY, on_cost=second.append, checkpoint=kept)
+    assert (len(env.extract_clients), len(env.judge_clients)) == (2, 3)          # only the fourth call ran
+    assert second == [0.02] and out.cost_usd == pytest.approx(0.02)
+    assert sorted(kept) == ["extract_v2", "extract_v3", "judge_L0", "judge_L2"]
+    plain = P.analyze_draft(env.video, api_key=KEY)                               # same answer as an unbroken run
+    assert {**out.result, "cost_usd": 0} == {**plain.result, "cost_usd": 0} and out.artifacts == plain.artifacts
+    third = []
+    P.analyze_draft(env.video, api_key=KEY, on_cost=third.append, checkpoint=kept)
+    assert third == [] and (len(env.extract_clients), len(env.judge_clients)) == (4, 5)   # nothing beyond the plain run
+
+
+def test_an_invalid_call_is_not_kept_for_the_retry(env, monkeypatch):
+    kept = Kept()
+    monkeypatch.setattr(P, "judge_one", lambda lib, i, variant, arm, model, client: {
+        "status": "invalid", "cost_usd": 0.01, "invalid_reason": "x", "neighbours": []})
+    with pytest.raises(RuntimeError):
+        P.analyze_draft(env.video, api_key=KEY, checkpoint=kept)
+    assert sorted(kept) == ["extract_v2", "extract_v3"]

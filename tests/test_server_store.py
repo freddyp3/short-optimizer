@@ -330,3 +330,72 @@ def test_a_new_draft_does_not_expire_an_upload_in_flight(tmp_path):
     assert st.get_draft(first.id, "tok").status == S.WAITING
     st.start_processing(first.id, "server")
     assert st.get_draft(first.id, "tok").status == S.PROCESSING
+
+
+# ------------------------------------------------------------------------------------------- reviews keyed on the video
+
+SHA = "a" * 64
+
+
+def _review(store: Store, token_id: str, paid_by: str = "server", sha: str | None = SHA):
+    draft = store.create_draft(token_id)
+    store.claim_upload(draft.upload_id)
+    store.start_processing(draft.id, paid_by, sha)
+    return store.get_draft(draft.id, token_id)
+
+
+def test_start_processing_stores_the_video_hash_as_the_first_delivery(store):
+    got = _review(store, "tok-a")
+    assert (got.video_sha256, got.attempts) == (SHA, 1)
+    assert _review(store, "tok-b", sha=None).video_sha256 is None
+
+
+def test_interrupted_reviews_are_delivered_again_until_their_deliveries_run_out(store, clock):
+    server, own, unkeyed = _review(store, "tok-a"), _review(store, "tok-b", "own_key"), _review(store, "tok-c", sha=None)
+    waiting = store.create_draft("tok-d")
+    clock.t += 50
+    again, failed = store.redeliver_interrupted(max_attempts=3)
+    assert [d.id for d in again] == [server.id] and sorted(failed) == sorted([own.id, unkeyed.id])
+    got = store.get_draft(server.id, "tok-a")
+    assert (got.status, got.attempts, got.started_at, got.step) == (PROCESSING, 2, clock.t, None)
+    for draft, token in ((own, "tok-b"), (unkeyed, "tok-c")):
+        lost = store.get_draft(draft.id, token)
+        assert (lost.status, lost.fail_code, lost.finished_at) == (FAILED, "interrupted", clock.t)
+    assert store.get_draft(waiting.id, "tok-d").status == WAITING
+    assert [d.attempts for d in store.redeliver_interrupted(3)[0]] == [3]
+    assert store.redeliver_interrupted(3) == ([], [server.id])                  # third delivery was the last
+    assert store.get_draft(server.id, "tok-a").fail_code == "interrupted"
+    assert store.redeliver_interrupted(3) == ([], [])
+
+
+def test_stages_are_kept_once_per_review_and_dropped_when_it_is_over(store):
+    a, b = _review(store, "tok-a"), _review(store, "tok-b", sha="b" * 64)
+    assert store.stages(a.id, SHA) == {}
+    assert store.put_stage(a.id, SHA, "extract_v2", {"status": "ok", "n": 1})
+    assert not store.put_stage(a.id, SHA, "extract_v2", {"status": "ok", "n": 2})          # the first write wins
+    assert store.put_stage(b.id, "b" * 64, "extract_v2", {"n": 3})
+    assert store.stages(a.id, SHA) == {"extract_v2": {"status": "ok", "n": 1}}
+    assert store.stages(a.id, "b" * 64) == {} and store.stages(b.id, SHA) == {}             # other video, other draft
+    with pytest.raises(ValueError):
+        store.put_stage(a.id, SHA, "bad", {"x": float("nan")})
+    assert store.drop_stages() == 0
+    store.finish(a.id, {"r": 1}, {}, 0.0)
+    assert store.drop_stages() == 1
+    assert store.stages(a.id, SHA) == {} and store.stages(b.id, "b" * 64) == {"extract_v2": {"n": 3}}
+
+
+def test_a_database_from_before_video_hashes_gains_the_columns(tmp_path, clock):
+    path = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE drafts (id TEXT PRIMARY KEY, token_id TEXT NOT NULL, upload_id TEXT NOT NULL UNIQUE, "
+                "created_at REAL NOT NULL, upload_expires_at REAL NOT NULL, claimed_at REAL, status TEXT NOT NULL, step TEXT, "
+                "fail_code TEXT, fail_message TEXT, paid_by TEXT, cost_usd REAL NOT NULL DEFAULT 0, result_json TEXT, "
+                "artifacts_json TEXT, started_at REAL, finished_at REAL)")
+    con.execute("INSERT INTO drafts (id, token_id, upload_id, created_at, upload_expires_at, status) "
+                "VALUES ('d1', 'tok-a', 'u1', 0, 0, 'done')")
+    con.commit()
+    con.close()
+    for _ in range(2):                                                          # opening twice changes nothing more
+        old = Store(path, clock).get_draft("d1", "tok-a")
+        assert (old.status, old.video_sha256, old.attempts) == (DONE, None, 0)
+    assert _review(Store(path, clock), "tok-b").video_sha256 == SHA

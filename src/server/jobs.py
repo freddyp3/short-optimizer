@@ -6,6 +6,13 @@ not atomic with the start. A job writes its steps and costs as it goes, ends in 
 settles the quota with what was really spent (a server-paid job whose analysis raised is settled at no less than
 the estimate, see ``failed_charge``), and deletes the uploaded file in every case.
 
+Each review runs exactly once. Its key is the SHA-256 of the uploaded video (``file_sha256``), stored on the draft
+when the job starts. Deliveries are at-least-once: ``submit`` is the first delivery, ``resume`` every later one (a
+restart re-delivers the reviews it cut off; a hosted queue such as Cloud Tasks would call it for each retry). A
+delivery for a review that is already running or already finished does nothing, and a delivery that does run picks
+up the outputs of the stages that finished before (``Checkpoint``), so no paid call is made twice. A review paid
+with the user's own key cannot be delivered again, because the key is never stored.
+
 What a user can see of a failure is one of a few fixed sentences chosen by the class of the error; the error's own
 text (which may hold a path) is never stored or logged. A user's own Gemini key exists only as an argument of that
 one job's function call.
@@ -13,6 +20,8 @@ one job's function call.
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import logging
 import math
 import threading
@@ -23,7 +32,7 @@ from pathlib import Path
 from src.server import config
 from src.server.media import Rejected
 from src.server.quota import BudgetExceeded, Quota
-from src.server.store import Draft, Store
+from src.server.store import MSG_INTERRUPTED, PROCESSING, Draft, Store
 
 log = logging.getLogger("so.server.jobs")
 
@@ -79,16 +88,46 @@ def failure(exc: BaseException, paid_by: str) -> tuple[str, str]:
     return "analysis_failed", MSG_FAILED
 
 
-def _default_analyze(video_path, api_key=None, on_cost=None, on_step=None):
+def file_sha256(path: Path | str) -> str:
+    """SHA-256 of the file's bytes: the key of the review of this video."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class Checkpoint:
+    """The finished stages of one review, kept under its video hash. ``get(stage)`` is the kept output or None;
+    ``put(stage, value)`` keeps a JSON value. A stage that cannot be kept is only run again on a retry, so a
+    failing ``put`` never fails the job."""
+
+    def __init__(self, store: Store, draft_id: str, video_sha256: str):
+        self.store, self.draft_id, self.video_sha256 = store, draft_id, video_sha256
+        self._kept = store.stages(draft_id, video_sha256)
+
+    def get(self, stage: str):
+        return self._kept.get(stage)
+
+    def put(self, stage: str, value) -> None:
+        try:
+            if self.store.put_stage(self.draft_id, self.video_sha256, stage, value):
+                self._kept[stage] = value
+        except Exception as inner:
+            log.warning("could not keep a stage class=%s", type(inner).__name__)
+
+
+def _default_analyze(video_path, api_key=None, on_cost=None, on_step=None, checkpoint=None):
     from src.tools.predict_retention import tool
 
-    return tool.analyze_draft(video_path, api_key=api_key, on_cost=on_cost, on_step=on_step)
+    return tool.analyze_draft(video_path, api_key=api_key, on_cost=on_cost, on_step=on_step, checkpoint=checkpoint)
 
 
 class JobRunner:
     """``analyze(path, api_key=, on_cost=, on_step=)`` returns an object with ``result``, ``artifacts``, ``cost_usd``
-    (default: ``predict_retention.tool.analyze_draft``, imported on first use). ``ready`` is an event set once the
-    library is loaded; until then a job reports the step "starting" and waits."""
+    (default: ``predict_retention.tool.analyze_draft``, imported on first use). If it also takes ``checkpoint=``
+    it is handed the review's ``Checkpoint``. ``ready`` is an event set once the library is loaded; until then a
+    job reports the step "starting" and waits."""
 
     def __init__(self, store: Store, quota: Quota, analyze: Callable | None = None,
                  max_total: int = config.MAX_JOBS_TOTAL, max_per_user: int = config.MAX_JOBS_PER_USER,
@@ -99,26 +138,36 @@ class JobRunner:
         self._active: dict[str, str] = {}
         self._futures: set[Future] = set()
         self._pool = ThreadPoolExecutor(max_workers=max(1, self.max_total), thread_name_prefix="so-job")
+        try:
+            self._checkpointed = "checkpoint" in inspect.signature(self.analyze).parameters
+        except (TypeError, ValueError):
+            self._checkpointed = False
 
     def active_ids(self) -> set[str]:
         with self._lock:
             return set(self._active)
 
-    def submit(self, draft: Draft, path: Path, own_key: str | None = None) -> None:
-        """Start the analysis of a claimed draft whose file passed validation and whose quota is reserved.
+    def submit(self, draft: Draft, path: Path, own_key: str | None = None, video_sha256: str | None = None) -> None:
+        """First delivery: start the analysis of a claimed draft whose file passed validation and whose quota is
+        reserved. ``video_sha256`` (default: computed from the file) becomes the review's key.
         Raises JobRefused at the job limits and DraftStateError if the draft cannot start; in both cases nothing
         was started and the caller cleans up (file, reservation, link)."""
         paid_by = "own_key" if own_key else "server"
+        if not video_sha256:
+            try:
+                video_sha256 = file_sha256(path)
+            except OSError:
+                video_sha256 = None          # no key: the review runs once and cannot be delivered again
         with self._lock:
             mine = sum(1 for t in self._active.values() if t == draft.token_id)
             if len(self._active) >= self.max_total or self.store.running_jobs() >= self.max_total:
                 raise JobRefused("server_busy")
             if mine >= self.max_per_user or self.store.running_jobs(draft.token_id) >= self.max_per_user:
                 raise JobRefused("user_busy")
-            self.store.start_processing(draft.id, paid_by)
+            self.store.start_processing(draft.id, paid_by, video_sha256)
             self._active[draft.id] = draft.token_id
             try:
-                future = self._pool.submit(self._run, draft.id, draft.token_id, Path(path), own_key, paid_by)
+                future = self._pool.submit(self._run, draft.id, draft.token_id, Path(path), own_key, paid_by, video_sha256)
             except RuntimeError:
                 del self._active[draft.id]
                 self.store.fail(draft.id, "analysis_failed", MSG_FAILED)
@@ -126,8 +175,55 @@ class JobRunner:
             self._futures.add(future)
             future.add_done_callback(self._futures.discard)
 
-    def _run(self, draft_id: str, token_id: str, path: Path, own_key: str | None, paid_by: str) -> None:
-        spent, outcome, analysed = [0.0], "failed", False
+    def resume(self, draft_id: str, token_id: str, path: Path) -> str:
+        """A later delivery of a review (after a restart, or a queue retry). Returns what it did:
+
+        ``duplicate``  the review is running in this process, or is not ``processing`` any more: nothing to do
+        ``lost``       the video is gone or is not the video the review is keyed on: the draft is failed
+        ``resumed``    the review runs again, starting after its last finished stage
+
+        The job limits do not apply: the review already held its place when it was first delivered."""
+        path = Path(path)
+        with self._lock:
+            if draft_id in self._active:
+                return "duplicate"
+            draft = self.store.get_draft(draft_id, token_id)
+            if draft is None or draft.status != PROCESSING or draft.paid_by != "server":
+                return "duplicate"
+            try:
+                same = bool(draft.video_sha256) and path.is_file() and file_sha256(path) == draft.video_sha256
+            except OSError:
+                same = False
+            if same:
+                self._active[draft_id] = token_id
+                try:
+                    future = self._pool.submit(self._run, draft_id, token_id, path, None, "server", draft.video_sha256,
+                                               self.quota.recorded_cost(draft_id))
+                except RuntimeError:
+                    del self._active[draft_id]
+                    same = False
+                else:
+                    self._futures.add(future)
+                    future.add_done_callback(self._futures.discard)
+                    return "resumed"
+        spent = self.quota.recorded_cost(draft_id)
+        self.store.fail(draft_id, "interrupted", MSG_INTERRUPTED, spent)
+        self._settle(draft_id, spent)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as inner:
+            log.error("could not delete an uploaded file class=%s", type(inner).__name__)
+        return "lost"
+
+    def _run(self, draft_id: str, token_id: str, path: Path, own_key: str | None, paid_by: str,
+             video_sha256: str | None = None, already_spent: float = 0.0) -> None:
+        spent, outcome, analysed = [float(already_spent)], "failed", False
+        extra = {}
+        if self._checkpointed and video_sha256 and paid_by == "server":
+            try:
+                extra["checkpoint"] = Checkpoint(self.store, draft_id, video_sha256)
+            except Exception as inner:
+                log.warning("could not read kept stages class=%s", type(inner).__name__)
 
         def on_cost(usd: float) -> None:
             usd = float(usd)
@@ -147,7 +243,7 @@ class JobRunner:
                 if self.ready is not None and not self.ready.is_set():
                     on_step(STARTING)
                     self.ready.wait(WARM_WAIT_S)
-                analysis = self.analyze(path, api_key=own_key, on_cost=on_cost, on_step=on_step)
+                analysis = self.analyze(path, api_key=own_key, on_cost=on_cost, on_step=on_step, **extra)
                 analysed = True
             finally:        # the file and the key are gone before the outcome becomes visible
                 own_key = None
@@ -155,7 +251,7 @@ class JobRunner:
                     path.unlink(missing_ok=True)
                 except OSError as inner:
                     log.error("could not delete an uploaded file class=%s", type(inner).__name__)
-            cost = float(analysis.cost_usd)
+            cost = float(analysis.cost_usd) + float(already_spent)
             spent[0] = max(spent[0], cost) if 0 <= cost < math.inf else spent[0]
             if not isinstance(analysis.result, dict) or not isinstance(analysis.artifacts, dict):
                 raise TypeError("analysis returned no result")
@@ -172,6 +268,10 @@ class JobRunner:
                 log.error("could not record a failed job class=%s", type(inner).__name__)
             self._settle(draft_id, spent[0] if analysed else self.failed_charge(spent[0], paid_by))
         finally:
+            try:
+                self.store.drop_stages()
+            except Exception as inner:
+                log.warning("could not drop kept stages class=%s", type(inner).__name__)
             with self._lock:
                 self._active.pop(draft_id, None)
             if self.on_done is not None:

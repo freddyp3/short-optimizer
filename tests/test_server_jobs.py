@@ -1,5 +1,6 @@
 """Job runner of the Claude MCP server: outcomes, cleanup, limits and secrecy (plan/10a sections 7 and 9)."""
 
+import hashlib
 import logging
 import sqlite3
 import threading
@@ -340,3 +341,110 @@ def test_submit_of_an_unclaimed_draft_raises_and_starts_nothing(env):
         runner.submit(draft, path)
     assert runner.active_ids() == set() and path.exists()
 
+
+
+# ------------------------------------------------------------------------------------- one review, delivered many times
+
+def cut_off(env, stage: dict | None = None, cost: float = 0.0):
+    """A server-paid review whose process died: processing, video on disk, maybe a kept stage and recorded cost."""
+    draft, path = env.claimed()
+    sha = jobs.file_sha256(path)
+    env.store.start_processing(draft.id, "server", sha)
+    if cost:
+        env.quota.add_cost(draft.id, cost)
+    for name, value in (stage or {}).items():
+        env.store.put_stage(draft.id, sha, name, value)
+    assert [d.id for d in env.store.redeliver_interrupted()[0]] == [draft.id]
+    return draft, path, sha
+
+
+def staged(calls: list, costs: dict):
+    """An analysis of two stages that honours the checkpoint: a kept stage is not run and not paid again."""
+    def analyze(path, api_key=None, on_cost=None, on_step=None, checkpoint=None):
+        spent = 0.0
+        for stage in ("extract_v2", "judge_L0"):
+            if checkpoint.get(stage) is None:
+                calls.append(stage)
+                on_cost(costs[stage])
+                spent += costs[stage]
+                checkpoint.put(stage, {"status": "ok", "stage": stage})
+        return SimpleNamespace(result=RESULT, artifacts=ARTIFACTS, cost_usd=spent)
+    return analyze
+
+
+def test_file_sha256_is_the_hash_of_the_bytes(tmp_path):
+    p = tmp_path / "v"
+    p.write_bytes(b"video bytes")
+    assert jobs.file_sha256(p) == hashlib.sha256(b"video bytes").hexdigest()
+
+
+def test_submit_keys_the_review_on_the_video_and_hands_the_job_a_checkpoint(env):
+    calls = []
+    runner = env.runner(staged(calls, {"extract_v2": 0.03, "judge_L0": 0.01}))
+    draft, path = env.claimed()
+    sha = jobs.file_sha256(path)
+    runner.submit(draft, path)
+    assert runner.wait_idle(10)
+    got = env.store.get_draft(draft.id, "tok-a")
+    assert (got.status, got.video_sha256, got.attempts) == ("done", sha, 1) and calls == ["extract_v2", "judge_L0"]
+    assert env.store.stages(draft.id, sha) == {}                                # nothing is kept once it is over
+
+
+def test_a_redelivered_review_skips_its_finished_stage_and_pays_only_for_the_rest(env):
+    calls = []
+    draft, path, sha = cut_off(env, {"extract_v2": {"status": "ok", "stage": "extract_v2"}}, cost=0.03)
+    runner = env.runner(staged(calls, {"extract_v2": 0.03, "judge_L0": 0.01}))
+    assert runner.resume(draft.id, "tok-a", path) == "resumed"
+    assert runner.wait_idle(10)
+    got = env.store.get_draft(draft.id, "tok-a")
+    assert (got.status, got.attempts) == ("done", 2) and got.result == RESULT
+    assert calls == ["judge_L0"]                                                 # the kept stage did not run again
+    assert got.cost_usd == pytest.approx(0.04) and env.quota.summary()["settled_usd"] == pytest.approx(0.04)
+    assert env.quota.usage("tok-a")["drafts_today"] == 1
+    assert not path.exists() and env.store.stages(draft.id, sha) == {}
+
+
+def test_a_duplicate_delivery_does_nothing(env):
+    calls, started, go = [], threading.Event(), threading.Event()
+
+    def analyze(path, api_key=None, on_cost=None, on_step=None):
+        calls.append(1)
+        started.set()
+        go.wait(10)
+        return SimpleNamespace(result=RESULT, artifacts=ARTIFACTS, cost_usd=0.0)
+
+    draft, path, _ = cut_off(env)
+    runner = env.runner(analyze)
+    assert runner.resume(draft.id, "tok-a", path) == "resumed"
+    assert started.wait(10)
+    assert runner.resume(draft.id, "tok-a", path) == "duplicate"                 # while it runs
+    go.set()
+    assert runner.wait_idle(10)
+    assert runner.resume(draft.id, "tok-a", path) == "duplicate"                 # after it finished
+    assert runner.resume(draft.id, "tok-b", path) == "duplicate"                 # somebody else's token
+    assert runner.resume("missing", "tok-a", path) == "duplicate"
+    assert runner.wait_idle(10) and calls == [1]
+    assert env.store.get_draft(draft.id, "tok-a").status == "done"
+
+
+@pytest.mark.parametrize("damage", ["gone", "changed"])
+def test_a_review_whose_video_is_gone_or_changed_is_failed_not_run(env, damage):
+    calls = []
+    draft, path, _ = cut_off(env, cost=0.03)
+    if damage == "gone":
+        path.unlink()
+    else:
+        path.write_bytes(b"another video")
+    runner = env.runner(staged(calls, {"extract_v2": 0.03, "judge_L0": 0.01}))
+    assert runner.resume(draft.id, "tok-a", path) == "lost"
+    got = env.store.get_draft(draft.id, "tok-a")
+    assert (got.status, got.fail_code) == ("failed", "interrupted") and calls == [] and not path.exists()
+    assert got.cost_usd == pytest.approx(0.03) and env.quota.summary()["settled_usd"] == pytest.approx(0.03)
+
+
+def test_an_analysis_without_a_checkpoint_parameter_still_runs_and_resumes(env):
+    seen = []
+    draft, path, _ = cut_off(env)
+    runner = env.runner(ok(seen=seen))
+    assert runner.resume(draft.id, "tok-a", path) == "resumed" and runner.wait_idle(10)
+    assert len(seen) == 1 and env.store.get_draft(draft.id, "tok-a").status == "done"

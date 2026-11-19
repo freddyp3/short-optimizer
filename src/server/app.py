@@ -59,7 +59,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.server import config, media, tools
 from src.server.auth import FailureLimiter, Tokens
-from src.server.jobs import JobRefused, JobRunner
+from src.server.jobs import JobRefused, JobRunner, file_sha256
 from src.server.quota import LimitReached, Quota
 from src.server.store import DraftStateError, Store, UploadUnavailable, connect
 
@@ -254,6 +254,7 @@ class AppState:
     brief: Callable | None = None
     upload_timeout_s: float = UPLOAD_BODY_TIMEOUT_S
     in_flight: set[str] = field(default_factory=set)
+    redeliver: list = field(default_factory=list)          # drafts ``recover`` found cut off; ``deliver`` runs them again
     calls: dict[str, int] = field(default_factory=dict)
     tool_threads: anyio.CapacityLimiter | None = None      # tool calls may wait; they get their own threads
 
@@ -346,12 +347,16 @@ def settle_interrupted(state: AppState, draft_ids: list[str]) -> None:
 
 
 def recover(state: AppState) -> dict:
-    """Start-up, before any job runs: fail drafts a dead process left in ``processing`` and settle them with the
-    cost recorded so far, re-open links whose upload was cut off, delete every leftover upload file."""
+    """Start-up, before any job runs. Reviews a dead process left in ``processing`` are queued for another
+    delivery when they can run again (``store.redeliver_interrupted``); the others are failed and settled with the
+    cost recorded so far. Links whose upload was cut off are re-opened, and every leftover upload file is deleted
+    except the videos of the reviews that will run again."""
     cfg = state.cfg
     cfg.UPLOAD_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    interrupted = state.store.fail_interrupted()
+    state.redeliver, interrupted = state.store.redeliver_interrupted(cfg.MAX_JOB_ATTEMPTS)
     settle_interrupted(state, interrupted)
+    state.store.drop_stages()
+    keep = {d.id for d in state.redeliver}
     con = connect(cfg.DB_PATH)
     try:
         cut_off = [r[0] for r in con.execute("SELECT id FROM drafts WHERE status = 'waiting_for_upload' "
@@ -360,17 +365,27 @@ def recover(state: AppState) -> dict:
         con.close()
     for draft_id in cut_off:
         state.store.release_upload(draft_id)
-    files = [p for p in cfg.UPLOAD_DIR.iterdir() if p.is_file() or p.is_symlink()]
+    files = [p for p in cfg.UPLOAD_DIR.iterdir() if (p.is_file() or p.is_symlink()) and p.name not in keep]
     for p in files:
         _unlink(p)
-    return {"interrupted": len(interrupted), "reopened": len(cut_off), "files": len(files)}
+    return {"interrupted": len(interrupted), "redelivered": len(keep), "reopened": len(cut_off), "files": len(files)}
+
+
+def deliver(state: AppState) -> dict:
+    """Run again the reviews ``recover`` queued. Returns how many were resumed, lost (their video is gone or
+    changed, so they are failed) or duplicates (already running or finished)."""
+    counts = {"resumed": 0, "lost": 0, "duplicate": 0}
+    drafts, state.redeliver = state.redeliver, []
+    for draft in drafts:
+        counts[state.runner.resume(draft.id, draft.token_id, state.cfg.UPLOAD_DIR / draft.id)] += 1
+    return counts
 
 
 def orphan_files(state: AppState) -> list[Path]:
     """Upload files that belong to no upload in flight and no running job. Files are listed before the live ids
     are read, so a file just created is never among them. Call on the thread that owns ``in_flight``."""
     files = [p for p in state.cfg.UPLOAD_DIR.iterdir() if p.is_file() or p.is_symlink()] if state.cfg.UPLOAD_DIR.is_dir() else []
-    live = set(state.in_flight) | state.runner.active_ids()
+    live = set(state.in_flight) | state.runner.active_ids() | {d.id for d in state.redeliver}
     return [p for p in files if p.name not in live]
 
 
@@ -381,6 +396,7 @@ def purge(state: AppState, orphans: list[Path] | None = None) -> dict:
     done = state.store.purge()
     settle_interrupted(state, done["interrupted"])
     state.starts.purge()
+    state.store.drop_stages()
     for p in orphans:
         _unlink(p)
     return {"expired": len(done["expired"]), "interrupted": len(done["interrupted"]), "deleted": len(done["deleted"]),
@@ -809,7 +825,7 @@ def upload_routes(state: AppState) -> list[Route]:
                 raise Refusal(f"limit:{exc.kind}", limit_message(exc, cfg), 429) from None
             reserved = True
             try:
-                state.runner.submit(draft, dest, own_key)
+                state.runner.submit(draft, dest, own_key, await thread(file_sha256, dest))
             except JobRefused as exc:
                 raise Refusal(f"busy:{exc.kind}", exc.user_message, 503) from None
             except DraftStateError:
@@ -934,6 +950,8 @@ def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Call
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         log.info("%s start-up recovered=%s purged=%s", _stamp(), recover(state), purge(state))
+        if state.redeliver:
+            log.info("%s redelivery %s", _stamp(), await anyio.to_thread.run_sync(deliver, state))
         threading.Thread(target=warm_up, name="so-warm", daemon=True).start()
 
         async def purge_loop() -> None:

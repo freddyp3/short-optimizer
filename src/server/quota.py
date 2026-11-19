@@ -144,6 +144,15 @@ class Quota:
         if total > self.cfg.BUDGET_FACTOR * self.cfg.EST_COST_PER_DRAFT_USD + EPS:
             raise BudgetExceeded(f"draft cost ${total:.2f} passed {self.cfg.BUDGET_FACTOR:g}x the estimate")
 
+    def recorded_cost(self, draft_id: str) -> float:
+        """What the running job of this draft has recorded as spent so far (all its deliveries together)."""
+        con = connect(self.db_path)
+        try:
+            return float(con.execute("SELECT COALESCE(SUM(usd), 0) FROM spend WHERE draft_id = ? "
+                                     "AND kind IN ('cost', 'own_cost')", (draft_id,)).fetchone()[0])
+        finally:
+            con.close()
+
     def settle(self, draft_id: str, actual_usd: float) -> None:
         """Replace the reservation (and running cost) with the actual cost. The draft still counts as one of the
         day's drafts, whether the job worked or failed. No-op for a draft without a reservation."""

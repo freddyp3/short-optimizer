@@ -769,3 +769,41 @@ def test_the_connector_icon_is_public_and_named_in_the_server_info(env):
         assert c.post("/icon.png").status_code == 405 and c.get("/assets/icon.png").status_code == 404
     icons = A.build_mcp(env.state).icons
     assert [i.src for i in icons] == [f"{BASE}/icon.png", f"{BASE}/icon.svg"]
+
+
+def test_an_upload_keys_its_review_on_the_hash_of_the_video(env, clips):
+    with client_of(env) as c:
+        start = env.call(c, "start_draft")
+        assert env.upload(c, start["upload_url"], clips["good"]).status_code == 200
+        env.idle()
+    got = env.state.store.get_draft(start["draft_id"], env.token_id)
+    assert (got.status, got.attempts) == ("done", 1)
+    assert got.video_sha256 == jobs.file_sha256(clips["good"])
+
+
+def test_start_up_runs_a_cut_off_review_again_and_fails_the_ones_it_cannot(tmp_path):
+    env = Env(tmp_path)
+    store, quota, uploads = env.state.store, env.state.quota, env.cfg.UPLOAD_DIR
+    drafts = {}
+    for name, paid_by in (("again", "server"), ("own", "own_key"), ("lost", "server")):
+        d = drafts[name] = store.create_draft(f"tok-{name}")
+        store.claim_upload(d.upload_id)
+        quota.check_and_reserve(f"tok-{name}", d.id, paid_by)
+        (uploads / d.id).write_bytes(name.encode())
+        store.start_processing(d.id, paid_by, jobs.file_sha256(uploads / d.id))
+    quota.add_cost(drafts["again"].id, 0.05)
+    (uploads / drafts["lost"].id).unlink()                                       # its video did not survive
+    (uploads / "stray").write_bytes(b"leftover")
+    with client_of(env):
+        env.idle()
+        got = {name: store.get_draft(d.id, f"tok-{name}") for name, d in drafts.items()}
+    assert (got["again"].status, got["again"].attempts) == ("done", 2)
+    assert env.seen == [{"api_key": None, "existed": True}]                      # one analysis, on the kept video
+    assert got["again"].cost_usd == pytest.approx(0.05 + 0.02)                   # what was recorded before + this run
+    for name in ("own", "lost"):
+        assert (got[name].status, got[name].fail_code) == ("failed", "interrupted")
+    assert env.files() == [] and env.state.redeliver == []
+    again = Env(tmp_path)                                                        # another restart delivers nothing
+    with client_of(again):
+        again.idle()
+    assert again.seen == [] and store.get_draft(drafts["again"].id, "tok-again").attempts == 2

@@ -391,11 +391,16 @@ def safe_error(e: BaseException, secret: str | None) -> Exception | None:
     return RuntimeError(f"{type(e).__name__}: {scrub(str(e), (secret,))}")
 
 
-def analyze_draft(video_path: str | Path, api_key: str | None = None, on_cost=None, on_step=None, *, client=None) -> DraftAnalysis:
+def analyze_draft(video_path: str | Path, api_key: str | None = None, on_cost=None, on_step=None, *, client=None,
+                  checkpoint=None) -> DraftAnalysis:
     """Full analysis of one draft. ``api_key`` None means GEMINI_API_KEY_PAID; a given key is used for all four
     Gemini calls of this job and nothing else, and never reaches a log, a file, the output or an exception text.
     ``on_cost(usd)`` runs after every paid call (an exception from it stops the job), ``on_step(name)`` at each of
-    ``STEPS``. ``client`` (tests, CLI) replaces the client built from the key."""
+    ``STEPS``. ``client`` (tests, CLI) replaces the client built from the key.
+
+    ``checkpoint`` (``get(stage)`` / ``put(stage, value)``) makes the four Gemini calls run exactly once across
+    retries of the same review: a call whose valid output was kept by an earlier attempt is not made again and
+    costs nothing; ``cost_usd`` and ``on_cost`` then cover this attempt only."""
     if client is not None and api_key is not None:
         raise ValueError("give a client or an api_key, not both")
     secret = None
@@ -408,7 +413,7 @@ def analyze_draft(video_path: str | Path, api_key: str | None = None, on_cost=No
             _SECRETS.add(secret)
     err = None
     try:
-        return _analyze(Path(video_path), client or new_genai_client(secret), on_cost, on_step)
+        return _analyze(Path(video_path), client or new_genai_client(secret), on_cost, on_step, checkpoint)
     except Exception as e:
         err = safe_error(e, secret)
         if err is None:
@@ -420,7 +425,7 @@ def analyze_draft(video_path: str | Path, api_key: str | None = None, on_cost=No
     raise err          # raised outside the handler, so the original exception is not attached as context
 
 
-def _analyze(video_path: Path, client, on_cost, on_step) -> DraftAnalysis:
+def _analyze(video_path: Path, client, on_cost, on_step, checkpoint=None) -> DraftAnalysis:
     from src.tools.audience.brief import library_label
 
     spent = [0.0]
@@ -429,6 +434,16 @@ def _analyze(video_path: Path, client, on_cost, on_step) -> DraftAnalysis:
         spent[0] += usd
         if on_cost:
             on_cost(usd)
+
+    def once(stage: str, call, cost_of) -> dict:
+        """The stage's record: the one an earlier attempt kept, or a fresh paid call (kept if it is valid)."""
+        rec = checkpoint.get(stage) if checkpoint is not None else None
+        if rec is None:
+            rec = call()
+            paid(cost_of(rec))
+            if checkpoint is not None and rec.get("status") == "ok":
+                checkpoint.put(stage, rec)
+        return rec
 
     step = on_step or (lambda name: None)
     step("measuring")
@@ -443,8 +458,8 @@ def _analyze(video_path: Path, client, on_cost, on_step) -> DraftAnalysis:
             step("describing")
             recs = {}
             for version in ("v2", "v3"):
-                rec = recs[version] = extract(blind, f"{blind.stem}_{version}", dur, version, client=client, uploads_path=uploads)
-                paid(extraction_cost(rec))
+                rec = recs[version] = once(f"extract_{version}", lambda: extract(
+                    blind, f"{blind.stem}_{version}", dur, version, client=client, uploads_path=uploads), extraction_cost)
                 if rec["status"] != "ok":
                     raise RuntimeError(f"extraction {version} failed: {rec.get('invalid_reason')}")
         finally:
@@ -457,9 +472,8 @@ def _analyze(video_path: Path, client, on_cost, on_step) -> DraftAnalysis:
     step("judging")
     judged = []
     for variant, arm in (("L0", "E"), ("L2", "T75")):
-        rec = judge_one(lib, n, variant, arm, C.DEFAULT_MODEL, client)
-        paid(rec["cost_usd"])
-        judged.append(rec)
+        judged.append(once(f"judge_{variant}", lambda: judge_one(lib, n, variant, arm, C.DEFAULT_MODEL, client),
+                           lambda rec: rec["cost_usd"]))
     a, b = judged
     if a["status"] != "ok" or b["status"] != "ok":
         raise RuntimeError(f"judging failed: {a.get('invalid_reason')} / {b.get('invalid_reason')}")
