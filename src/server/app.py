@@ -18,6 +18,10 @@ Environment, besides the ``SO_*`` settings of ``config.py`` (SO_PUBLIC_BASE_URL 
     GEMINI_API_KEY_PAID        the server's Gemini key (read from the environment or .env; not needed when faked)
     SO_GOOGLE_CLIENT_ID, SO_GOOGLE_CLIENT_SECRET, SO_AUTO_APPROVE_EMAILS
                                Google sign-in next to the invite tokens (``oauth.py``)
+    SO_FRONT_UPSTREAM, SO_PROXY_SECRET
+                               chain two servers (``front.py``): with both set this is the always-on front, which
+                               signs users in and passes tool calls on to the address in SO_FRONT_UPSTREAM; with
+                               only the secret set this is the home server behind such a front
     SO_GCP_JOB and the other SO_GCP_* settings
                                run each server-paid review as a Cloud Run job started through Cloud Tasks
                                (``src/cloud/dispatch.py``) instead of in this process
@@ -66,7 +70,7 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from src.server import config, media, oauth, tools
+from src.server import config, front, media, oauth, tools
 from src.server.auth import FailureLimiter, Tokens
 from src.server.jobs import JobRefused, JobRunner, file_sha256
 from src.server.quota import LimitReached, Quota
@@ -265,6 +269,8 @@ class AppState:
     in_flight: set[str] = field(default_factory=set)
     users: oauth.Users | None = None                       # set together with ``oauth`` when Google sign-in is on
     oauth: oauth.Provider | None = None
+    upstream: front.Upstream | None = None                 # set on the front: tool calls are passed on to the home server
+    proxy_secret: str | None = None                        # set on the home server: what the front proves itself with
     redeliver: list = field(default_factory=list)          # drafts ``recover`` found cut off; ``deliver`` runs them again
     calls: dict[str, int] = field(default_factory=dict)
     tool_threads: anyio.CapacityLimiter | None = None      # tool calls may wait; they get their own threads
@@ -469,6 +475,8 @@ class McpAuth:
             presented = match.group(1) if match else ("" if header is None else None)
         found = await anyio.to_thread.run_sync(self.state.tokens.verify, presented) if presented else None
         token_id = found.id if found else None
+        if token_id is None and not self.path_token:                              # the front, calling for a signed-in user?
+            token_id = front.trusted_user(self.state.proxy_secret, presented, Headers(scope=scope).get(front.USER_HEADER))
         if token_id is None and presented and self.state.oauth is not None:       # not an invite token: a signed-in user?
             token_id = await anyio.to_thread.run_sync(self.state.oauth.user_of, presented)
             if token_id:
@@ -538,6 +546,11 @@ def build_mcp(state: AppState) -> Server:
             info.outcome = "invalid_input"
             return _tool_result({"status": "invalid_input", "message": problem}, True)
         token_id = info.token_id
+        if state.upstream is not None:
+            answer = await anyio.to_thread.run_sync(state.upstream.call, token_id, tool.name, arguments)
+            result, is_error = answer if answer is not None else ({"status": "offline", "message": front.MSG_OFFLINE}, False)
+            info.outcome = str(result.get("status", "-"))[:40] if isinstance(result, dict) else "-"
+            return _tool_result(result, is_error)
         if state.calls.get(token_id, 0) >= MAX_CALLS_PER_TOKEN:
             info.outcome = "busy"
             return _tool_result({"status": "busy", "message": "Too many requests at once. Wait for the earlier ones to finish."})
@@ -1080,11 +1093,13 @@ def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Call
               similar: Callable | None = None, brief: Callable | None = None, clock: Callable[[], float] = time.time,
               allow_path_token: bool = False, allow_insecure_local: bool = False,
               upload_timeout_s: float = UPLOAD_BODY_TIMEOUT_S, purge_every_s: float = PURGE_EVERY_S,
-              google: oauth.Google | None = None, auto_approve: tuple[str, ...] = ()) -> RequestLog:
+              google: oauth.Google | None = None, auto_approve: tuple[str, ...] = (),
+              upstream: front.Upstream | None = None, proxy_secret: str | None = None) -> RequestLog:
     """The ASGI app. ``analyze`` replaces ``analyze_draft``; ``warm`` loads the library in a background thread
     (None: nothing to load, ready at once); ``similar`` / ``brief`` replace the functions of ``audience.brief``.
     ``google`` turns sign-in on (``oauth``): users connect with their Google account next to the invite tokens,
-    and the addresses in ``auto_approve`` need no approval.
+    and the addresses in ``auto_approve`` need no approval. ``upstream`` makes this server the front of another
+    one (``front.py``): tool calls are passed on. ``proxy_secret`` makes it the home server behind such a front.
     Start-up recovery, the first purge and the warm-up run when the app's lifespan starts."""
     check_public_url(cfg.PUBLIC_BASE_URL, allow_insecure_local)
     ready = threading.Event()
@@ -1096,7 +1111,8 @@ def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Call
     state = AppState(cfg=cfg, store=store, quota=quota, tokens=Tokens(cfg.DB_PATH, clock),
                      limiter=FailureLimiter(cfg.BAD_TOKEN_MAX, cfg.BAD_TOKEN_WINDOW_S, clock),
                      starts=tools.StartLimiter(cfg.DB_PATH, clock), runner=runner, refusals=tools.Refusals(), ready=ready,
-                     similar=similar, brief=brief, upload_timeout_s=upload_timeout_s)
+                     similar=similar, brief=brief, upload_timeout_s=upload_timeout_s, upstream=upstream,
+                     proxy_secret=proxy_secret)
     if google is not None:
         state.users = oauth.Users(cfg.DB_PATH, clock, auto_approve)
         state.oauth = oauth.Provider(cfg.DB_PATH, state.users, google, clock)
@@ -1238,39 +1254,47 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, handlers=[handler])
     log.setLevel(logging.INFO)
     go_offline()
+    env = os.environ
     try:
         cfg = config.load()
-        opts = load_options(os.environ, cfg)
-        if not opts.fake_analysis:
-            with contextlib.suppress(ImportError):
+        opts = load_options(env, cfg)
+        with contextlib.suppress(ImportError):
+            if not opts.fake_analysis:
                 from dotenv import load_dotenv
 
                 load_dotenv(".env")
-            if not os.environ.get("GEMINI_API_KEY_PAID", "").strip():
+        upstream, cloud = None, None
+        proxy_secret = env.get("SO_PROXY_SECRET", "").strip() or None
+        if env.get("SO_FRONT_UPSTREAM", "").strip():                 # the front: no tools here, so nothing they need
+            upstream = front.Upstream(env["SO_FRONT_UPSTREAM"].strip(), proxy_secret or "")
+            proxy_secret = None
+        else:
+            if not opts.fake_analysis and not env.get("GEMINI_API_KEY_PAID", "").strip():
                 raise StartupError("GEMINI_API_KEY_PAID is not set (environment or .env)")
-        check_binaries()
-        cloud = None
-        if not opts.fake_analysis:
-            from src.cloud import dispatch
-            from src.server.jobs import _default_analyze
+            check_binaries()
+            if not opts.fake_analysis:
+                from src.cloud import dispatch
+                from src.server.jobs import _default_analyze
 
-            cloud = dispatch.from_env(os.environ, local_analyze=_default_analyze,
-                                      budget_usd=cfg.BUDGET_FACTOR * cfg.EST_COST_PER_DRAFT_USD)
+                cloud = dispatch.from_env(env, local_analyze=_default_analyze,
+                                          budget_usd=cfg.BUDGET_FACTOR * cfg.EST_COST_PER_DRAFT_USD)
     except (StartupError, config.ConfigError, ValueError, OSError) as exc:
         print(f"cannot start: {exc}", file=sys.stderr)
         return 2
-    google, approve = google_from_env(os.environ, cfg), tuple(os.environ.get("SO_AUTO_APPROVE_EMAILS", "").split(","))
-    fake = opts.fake_analysis
+    google, approve = google_from_env(env, cfg), tuple(env.get("SO_AUTO_APPROVE_EMAILS", "").split(","))
+    fake = opts.fake_analysis and upstream is None
     if fake:
         from src.tools.audience import brief
 
         log.warning("%s FAKE ANALYSIS is on: results are canned, nothing is sent to Gemini", _stamp())
-    app = build_app(cfg, analyze=fake_analyze if fake else cloud.analyze if cloud else None, warm=None if fake else _real_warm,
+    app = build_app(cfg, analyze=fake_analyze if fake else cloud.analyze if cloud else None,
+                    warm=None if fake or upstream else _real_warm,
                     similar=fake_similar if fake else None, brief=brief.audience_brief if fake else None,
                     allow_path_token=opts.allow_path_token, allow_insecure_local=opts.allow_insecure_local,
-                    google=google, auto_approve=approve)
-    log.info("%s listening on %s:%d public=%s path_token=%s google_sign_in=%s reviews=%s", _stamp(), HOST, opts.port,
-             cfg.PUBLIC_BASE_URL, opts.allow_path_token, google is not None, "cloud_run" if cloud else "fake" if fake else "local")
+                    google=google, auto_approve=approve, upstream=upstream, proxy_secret=proxy_secret)
+    reviews = "passed on to " + upstream.url if upstream else "cloud_run" if cloud else "fake" if fake else "local"
+    log.info("%s listening on %s:%d public=%s path_token=%s google_sign_in=%s behind_front=%s reviews=%s", _stamp(), HOST,
+             opts.port, cfg.PUBLIC_BASE_URL, opts.allow_path_token, google is not None, proxy_secret is not None, reviews)
     uvicorn.run(app, host=HOST, port=opts.port, access_log=False, log_level="warning", server_header=False,
                 proxy_headers=False, timeout_graceful_shutdown=5)
     return 0
