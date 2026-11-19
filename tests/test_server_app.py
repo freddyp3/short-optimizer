@@ -295,20 +295,37 @@ def assert_page_headers(r) -> None:
     assert r.headers["cache-control"] == "no-store"
 
 
-def test_upload_page_is_self_contained_and_has_the_security_headers(env):
+def test_upload_pages_are_self_contained_and_have_the_security_headers(env):
     with client_of(env) as c:
         url = env.call(c, "start_draft")["upload_url"]
-        r = c.get(url.removeprefix(BASE))
-    assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
-    assert_page_headers(r)
-    page = r.text
-    for bad in ("http://", "https://", "//", "<script", "javascript:", "src=", "href=", "@import", "url(", "action="):
-        assert bad not in page, bad
-    assert not re.search(r"\son\w+\s*=", page)
-    assert 'type="file"' in page and 'name="video"' in page and 'method="post"' in page and "multipart/form-data" in page
-    assert 'name="gemini_key" type="password"' in page and 'maxlength="200"' in page and "never stored" in page
-    assert "8-60 seconds" in page and "100 MB" in page and "deleted from the server" in page
-    assert env.token not in page and url.rsplit("/", 1)[1] not in page
+        path = url.removeprefix(BASE)
+        pages = {pay: c.get(path + (f"?pay={pay}" if pay else "")) for pay in ("", "free", "key", "other")}
+    for r in pages.values():
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+        assert_page_headers(r)
+        for bad in ("http://", "https://", "//", "<script", "javascript:", "src=", "href=", "@import", "url(", "action="):
+            assert bad not in r.text, bad
+        assert not re.search(r"\son\w+\s*=", r.text)
+        assert env.token not in r.text and url.rsplit("/", 1)[1] not in r.text
+    for pay in ("", "other"):                                                       # first page: who pays
+        choose = pages[pay].text
+        assert 'method="get"' in choose and 'name="pay" value="free"' in choose and 'name="pay" value="key"' in choose
+        assert 'type="file"' not in choose and "3 a day" in choose
+    for pay in ("free", "key"):                                                     # second page: the upload form
+        page = pages[pay].text
+        assert 'type="file"' in page and 'name="video"' in page and 'method="post"' in page and "multipart/form-data" in page
+        assert "8-60 seconds" in page and "100 MB" in page and ">Upload</button>" in page and "deleted from the server" in page
+    assert 'name="gemini_key"' not in pages["free"].text
+    assert 'name="gemini_key" type="password" maxlength="200"' in pages["key"].text and "never stored" in pages["key"].text
+
+
+def test_the_own_key_page_refuses_an_upload_without_a_key(env, clips):
+    with client_of(env) as c:
+        start = env.call(c, "start_draft")
+        r = env.upload(c, start["upload_url"] + "?pay=key", clips["good"])
+        assert r.status_code == 400 and A.MSG_NO_KEY in r.text and 'name="gemini_key"' in r.text
+        assert env.files() == [] and env.seen == []
+        assert env.upload(c, start["upload_url"] + "?pay=key", clips["good"], key=FAKE_KEY).status_code == 200
 
 
 def test_unknown_used_and_expired_links_get_a_plain_404(env, clips):
@@ -571,7 +588,7 @@ def test_log_lines_name_routes_and_tools_but_never_ids_tokens_or_paths(env, clip
     expected = [
         "token=- route=POST /mcp outcome=unauthorized status=401 cost=-",
         f"token={tid} route=POST /mcp:start_draft outcome=waiting_for_upload status=200 cost=-",
-        "token=- route=GET /u/{upload_id} outcome=form status=200 cost=-",
+        "token=- route=GET /u/{upload_id} outcome=choose status=200 cost=-",
         f"token={tid} route=POST /u/{{upload_id}} outcome=refused:too_short status=400 cost=-",
         f"token={tid} route=POST /u/{{upload_id}} outcome=accepted:own_key status=200 cost=-",
         f"token={tid} route=job outcome=done status=- cost=0.0200",
@@ -739,3 +756,16 @@ def test_instructions_keep_ideas_grounded_in_tool_results_and_close_to_the_draft
                    "give fewer", "do not add fixes of your own", "not tested predictions",
                    "change to the video's structure", "leave the content to the creator"):
         assert phrase in text, phrase
+
+
+def test_the_connector_icon_is_public_and_named_in_the_server_info(env):
+    with client_of(env) as c:
+        for path, mime in (("/icon.png", "image/png"), ("/apple-touch-icon.png", "image/png"), ("/icon.svg", "image/svg+xml"),
+                           ("/favicon.svg", "image/svg+xml"), ("/favicon.ico", "image/x-icon")):
+            r = c.get(path)
+            assert r.status_code == 200 and r.headers["content-type"].startswith(mime) and len(r.content) > 100
+            assert r.headers["x-content-type-options"] == "nosniff"
+        assert c.get("/icon.png").content.startswith(b"\x89PNG") and b"#f97316" in c.get("/icon.svg").content
+        assert c.post("/icon.png").status_code == 405 and c.get("/assets/icon.png").status_code == 404
+    icons = A.build_mcp(env.state).icons
+    assert [i.src for i in icons] == [f"{BASE}/icon.png", f"{BASE}/icon.svg"]

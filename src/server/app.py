@@ -91,8 +91,9 @@ Brawl Stars channel: every prediction is relative to that channel's audience and
 It is not a general forecast and does not predict views.
 
 Workflow for one draft:
-1. Call start_draft and show the user the returned upload_url as a link. You cannot pass the video yourself; the \
-user uploads it on that page (mp4, mov or webm; 8 to 60 seconds; vertical or square; up to 100 MB). The link works \
+1. Call start_draft and give the user the returned upload_url as an embedded markdown link with exactly the text \
+"One-time upload link", that is [One-time upload link](upload_url). Never print the bare address. You cannot pass \
+the video yourself; the user uploads it on that page (mp4, mov or webm; 8 to 60 seconds; vertical or square; up to 100 MB). The link works \
 once and for 30 minutes.
 2. Wait until the user says the upload is done. The analysis then takes about 3 minutes.
 3. Call get_retention with the draft_id. If it answers "processing", call it again. If it answers "failed", tell \
@@ -109,7 +110,7 @@ described by writing_rules in the audience brief.
 How to present the publish plan (keep it short enough to read in a minute; use these headings in this order):
 - "Verdict": one or two sentences: the biggest strength and the biggest risk of this draft.
 - "How viewers will watch it": a three-row table (Opening, Middle, Ending) with the verdict (above / typical / \
-below this channel's usual), the main reason in plain words, and the evidence grade in two or three words.
+below usual), the main reason in plain words, and the evidence grade in two or three words.
 - "Where viewers leave": the two drop moments as timestamps with the reason, the larger loss marked.
 - "Fix before posting": at most three concrete edits, each tied to a second of the video, most valuable first. \
 Take them from the advice and reasons in get_retention; do not add fixes of your own.
@@ -127,12 +128,16 @@ to borrow. Say in one short line that these are ideas from this channel's histor
 - "Similar past Shorts": two or three of the closest, with how they held viewers and one real comment each; say \
 so plainly when the matches are loose.
 - "Audience reaction": the three labelled parts from writing_rules, with simulated comments clearly marked.
-- "How sure is this": one or two lines taken from the caveats and evidence grades. Never present a verdict as a \
+- "How sure is this": one or two lines on how strong the evidence is, taken from the evidence grades. Never present a verdict as a \
 precise forecast, never invent numbers, and do not show internal field names or raw JSON.
 Phrase every fix and idea as a change to the video's structure, not to what happens in the game: say \
 "add a payoff around 0:08" or "show the stake in the first second", not which character should do what. Name the \
 kind of moment and the time; leave the content to the creator.
 Write for a creator, not an engineer: plain words, timestamps like 0:07, no statistics jargon.
+Do not tell the user what the verdicts are measured against. No sentence such as "everything is judged against your \
+channel's past Shorts" or "this is not a general forecast", neither as an introduction nor as a disclaimer, and do \
+not repeat caveats of that kind from the tool results. Past Shorts are mentioned only under the headings that ask \
+for them ("Ideas to make it stronger", "Similar past Shorts", "Audience reaction").
 
 Limits such as the number of drafts per day arrive as normal tool results with a message; pass them on to the user.
 
@@ -152,8 +157,8 @@ def _schema(properties: dict, required: list[str]) -> dict:
 TOOLS: dict[str, types.Tool] = {t.name: t for t in (
     types.Tool(
         name="start_draft", title="Start a draft check",
-        description="Start checking a new draft Short. Returns a draft_id and a one-time upload_url; show the link "
-                    "to the user so they can upload the video (8-60 s, vertical, mp4/mov/webm, up to 100 MB). Call "
+        description="Start checking a new draft Short. Returns a draft_id and a one-time upload_url; give it "
+                    "to the user as a markdown link labelled \"One-time upload link\" so they can upload the video (8-60 s, vertical, mp4/mov/webm, up to 100 MB). Call "
                     "this first, once per draft.",
         input_schema=_schema({}, []),
         annotations=types.ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False,
@@ -201,7 +206,8 @@ MSG_RECEIVED = "Upload received. Go back to the chat and say you're done."
 MSG_BAD_FORM = "The upload could not be read. Please choose the video file and press Upload again."
 MSG_NO_FILE = "No video file was chosen. Please choose the video file and press Upload."
 MSG_TIMEOUT = "The upload took longer than two minutes and was stopped. Please try again on a faster connection."
-MSG_BAD_KEY = "That does not look like a Gemini API key. Please check it, or leave the field empty."
+MSG_BAD_KEY = "That does not look like a Gemini API key. Please check it and try again."
+MSG_NO_KEY = "Please enter your Gemini API key, or go back and use a free draft."
 MSG_SERVER_ERROR = "Something went wrong on the server. Please try again."
 MSG_TRY_AGAIN = "You can try again with this same link below."
 MSG_NEW_LINK = "This link can no longer be used. Go back to the chat and ask for a new one."
@@ -441,7 +447,7 @@ class McpAuth:
                 return await Response(status_code=429)(scope, receive, send)
             if presented != "":
                 self.state.limiter.record_failure(addr)
-            info.outcome = "unauthorized"
+            info.outcome = "unauthorized" if presented else "unauthorized:no_header" if presented == "" else "unauthorized:bad_header"
             return await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
         info.token_id = found.id
         if scope["method"] != "POST":
@@ -520,75 +526,110 @@ def build_mcp(state: AppState) -> Server:
             info.cost_usd = float(result["cost_usd"])
         return _tool_result(result)
 
-    return Server("shorts-pre-publish-copilot", version="0.1.0", title="Shorts Pre-Publish Copilot",
+    base = state.cfg.PUBLIC_BASE_URL
+    icons = [types.Icon(src=f"{base}/icon.png", mime_type="image/png", sizes=["512x512"]),
+             types.Icon(src=f"{base}/icon.svg", mime_type="image/svg+xml", sizes=["any"])]
+    return Server("shorts-pre-publish-copilot", version="0.1.0", title="Shorts Pre-Publish Copilot", icons=icons,
                   instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 # ------------------------------------------------------------------------------------------------------ upload page
 
 STYLE = (
-    ":root{color-scheme:dark}*{box-sizing:border-box}"
+    ":root{color-scheme:light;--bg:#f7f8fb;--card:#fff;--border:#e4e7ee;--line:#dde1ea;--ink:#1a2238;--soft:#5b6478;"
+    "--muted:#a3abbd;--dim:#fbfbfd;--accent:#f97316;--accent-soft:#fdba74;--accent-bg:#fff7ed;--accent-text:#c2410c;"
+    "--accent-ink:#9a3412;--tile:#fde3c8}*{box-sizing:border-box}"
     "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1.5rem;"
-    "font-family:system-ui,-apple-system,'Segoe UI',sans-serif;line-height:1.5;color:#e9ecf5;"
-    "background:radial-gradient(1200px 600px at 20% -10%,#2a2f6b 0%,transparent 60%),"
-    "radial-gradient(900px 500px at 110% 110%,#5b1f5e 0%,transparent 55%),#0d0f1a}"
-    ".card{width:100%;max-width:30rem;background:rgba(22,25,43,.92);border:1px solid #2b3050;border-radius:18px;"
-    "padding:2rem 1.75rem;box-shadow:0 20px 60px rgba(0,0,0,.45)}"
-    ".brand{font-size:.78rem;letter-spacing:.14em;text-transform:uppercase;color:#9aa3ff;font-weight:700}"
-    "h1{margin:.35rem 0 .4rem;font-size:1.55rem;line-height:1.2}.lead{margin:0 0 1.2rem;color:#aab0c8}"
-    "label{display:block;margin-top:1.2rem;font-weight:600;font-size:.95rem}"
-    "input{display:block;width:100%;margin-top:.45rem;padding:.7rem .8rem;border-radius:10px;border:1px solid #353b60;"
-    "background:#12152a;color:inherit;font-size:.95rem}input:focus{outline:2px solid #7c86ff;outline-offset:1px}"
-    "input[type=file]{padding:1.1rem .8rem;border-style:dashed;cursor:pointer}"
-    "input::file-selector-button{margin-right:.8rem;padding:.45rem .9rem;border:0;border-radius:8px;"
-    "background:#2f3566;color:#e9ecf5;font-weight:600;cursor:pointer}"
-    ".chips{display:flex;flex-wrap:wrap;gap:.4rem;margin:.7rem 0 0;padding:0;list-style:none}"
-    ".chips li{font-size:.78rem;padding:.25rem .6rem;border-radius:999px;background:#1c2040;border:1px solid #30365c;"
-    "color:#c3c8e6}.note{margin:.5rem 0 0;color:#8f96b3;font-size:.84rem}"
-    "button{width:100%;margin-top:1.6rem;padding:.85rem 1.2rem;font-size:1rem;font-weight:700;border:0;"
-    "border-radius:12px;color:#fff;cursor:pointer;background:linear-gradient(135deg,#6b74ff,#b24bd6)}"
-    "button:hover{filter:brightness(1.08)}"
-    ".msg{margin:0 0 1rem;padding:.85rem 1rem;border-radius:12px;border:1px solid #3a4070;background:#1a1e3a}"
-    ".msg.ok{border-color:#2f7d5b;background:#12291f;color:#bff0d6}"
-    ".msg.bad{border-color:#8a4a2c;background:#2b1a12;color:#ffd9bf}"
-    ".steps{margin:1.2rem 0 0;padding:0;list-style:none;counter-reset:s;color:#aab0c8;font-size:.88rem}"
-    ".steps li{counter-increment:s;margin:.35rem 0;padding-left:1.9rem;position:relative}"
-    ".steps li::before{content:counter(s);position:absolute;left:0;top:.05rem;width:1.3rem;height:1.3rem;"
-    "border-radius:50%;background:#262b52;color:#c9ceff;font-size:.75rem;font-weight:700;display:flex;"
-    "align-items:center;justify-content:center}"
-    ".foot{margin:1.4rem 0 0;padding-top:1rem;border-top:1px solid #272c4a;color:#7f86a6;font-size:.78rem}")
+    "font-family:-apple-system,'SF Pro Display','Helvetica Neue',Inter,system-ui,sans-serif;line-height:1.5;"
+    "color:var(--ink);background:var(--bg)}"
+    ".card{width:100%;max-width:29rem;background:var(--card);border:1px solid var(--border);border-radius:14px;"
+    "padding:1.75rem;box-shadow:0 1px 2px rgba(26,34,56,.05)}"
+    "h1{margin:0 0 .3rem;font-size:1.35rem;line-height:1.2;font-weight:650;letter-spacing:-.015em}"
+    "label{display:block;margin-top:1.3rem;font-weight:600;font-size:.95rem;letter-spacing:-.01em}"
+    "input{display:block;width:100%;margin-top:.5rem;padding:.7rem .8rem;border-radius:10px;"
+    "border:1.2px solid var(--border);background:var(--card);color:inherit;font:inherit;font-size:.95rem;"
+    "transition:border-color .3s,box-shadow .3s}input::placeholder{color:var(--muted)}"
+    "input:hover{border-color:var(--line)}"
+    "input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 4px rgba(249,115,22,.14)}"
+    "input[type=file]{padding:1.2rem .85rem;border:1.5px dashed var(--line);background:var(--dim);cursor:pointer}"
+    "input[type=file]:hover{border-color:var(--accent-soft);background:var(--accent-bg)}"
+    "input::file-selector-button{margin-right:.85rem;padding:.45rem .85rem;border:1px solid var(--border);"
+    "border-radius:8px;background:var(--card);color:var(--ink);font:inherit;font-size:.9rem;font-weight:600;cursor:pointer}"
+    ".reqs{margin:.9rem 0 0;color:var(--soft);font-size:.9rem}.reqs p{margin:0;font-weight:600;color:var(--ink)}"
+    ".reqs ul{margin:.35rem 0 0;padding-left:1.2rem}.reqs li{margin:.15rem 0}.reqs li::marker{color:var(--accent)}"
+    ".note{margin:.55rem 0 0;color:var(--soft);font-size:.84rem}"
+    "button{font:inherit;cursor:pointer}"
+    ".back{margin:0 0 1rem;padding:0;border:0;background:none;color:var(--accent);font-size:.95rem;font-weight:600}"
+    ".back:hover{color:var(--accent-text)}"
+    ".opts{margin-top:1rem;border:1px solid var(--border);border-radius:10px;overflow:hidden}"
+    ".opt{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;width:100%;padding:.95rem 1rem;"
+    "text-align:left;color:var(--ink);background:var(--card);border:0;font-size:1rem;font-weight:600;"
+    "letter-spacing:-.01em;transition:background-color .15s}.opt+.opt{border-top:1px solid var(--border)}"
+    ".opt:hover{background:var(--accent-bg)}.opt:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}"
+    ".opt span{color:var(--soft);font-size:.88rem;font-weight:400;letter-spacing:0}"
+    ".go{width:100%;margin-top:1.5rem;padding:.8rem 1.2rem;font-size:1rem;font-weight:600;border:0;"
+    "border-radius:10px;color:#fff;background:var(--accent);transition:background-color .15s}"
+    ".go:hover{background:#ea580c}.go:focus-visible{outline:2px solid var(--accent-soft);outline-offset:2px}"
+    ".msg{margin:.6rem 0 0;font-weight:600;font-size:.95rem}.msg.bad{color:#e11d48}"
+    ".done{text-align:center;padding:1.2rem 0 .4rem}.done svg{display:block;margin:0 auto 1.1rem}"
+    ".done .msg{margin:0;font-size:1.05rem;letter-spacing:-.01em;animation:rise .5s cubic-bezier(.2,.8,.2,1) 1.75s backwards}"
+    ".done circle,.done path{transform-box:fill-box;transform-origin:center}"
+    ".ring{fill:none;stroke:var(--accent);stroke-width:5;stroke-linecap:round;stroke-dasharray:188.5;"
+    "transform:rotate(-90deg);animation:spin 1.5s cubic-bezier(.45,0,.2,1) backwards,ring 1.5s cubic-bezier(.6,0,.2,1) backwards}"
+    ".disc{fill:var(--accent);animation:pop .5s cubic-bezier(.2,.8,.2,1) 1.4s backwards}"
+    ".tick{fill:none;stroke:#fff;stroke-width:5;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:40;"
+    "animation:draw .4s cubic-bezier(.4,0,.2,1) 1.7s backwards}"
+    "@keyframes spin{from{transform:rotate(-90deg)}to{transform:rotate(990deg)}}"
+    "@keyframes ring{0%{stroke-dashoffset:170}55%{stroke-dashoffset:120}100%{stroke-dashoffset:0}}"
+    "@keyframes pop{from{transform:scale(0);opacity:0}}@keyframes draw{from{stroke-dashoffset:40}}"
+    "@keyframes rise{from{opacity:0;transform:translateY(6px)}}"
+    ".foot{margin:1.1rem 0 0;color:var(--muted);font-size:.8rem}"
+    "@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}")
+DONE_MARK = ('<svg width="76" height="76" viewBox="0 0 72 72" aria-hidden="true"><circle class="ring" cx="36" cy="36" r="30"/>'
+             '<circle class="disc" cx="36" cy="36" r="30"/><path class="tick" d="M24 37l8.5 8.5L49 28"/></svg>')
+PAY_MODES = ("free", "key")
+TITLE_UPLOAD, TITLE_CHOOSE = "Upload your draft Short", "Upload a draft"
 
 
-def _form(cfg: config.Config) -> str:
-    chips = [f"{cfg.MIN_DURATION_S:g}-{cfg.MAX_DURATION_S:g} seconds", "vertical or square",
-             " / ".join(cfg.ALLOWED_CONTAINERS), f"up to {cfg.MAX_UPLOAD_BYTES / config.MIB:g} MB"]
+def _choice(cfg: config.Config) -> str:
+    """First page: who pays. Each option is a submit button of a GET form, so the page carries no address."""
+    return ('<form method="get" class="opts">'
+            f'<button class="opt" name="pay" value="free">Free upload <span>{cfg.DRAFTS_PER_DAY} a day</span></button>'
+            '<button class="opt" name="pay" value="key">Use your own Gemini key</button></form>')
+
+
+def _form(cfg: config.Config, pay: str | None = None) -> str:
+    """Second page: the upload form. With ``pay == "key"`` it also asks for the user's own Gemini key."""
+    reqs = [f"{cfg.MIN_DURATION_S:g}-{cfg.MAX_DURATION_S:g} seconds long", "vertical or square",
+            f"an {', '.join(cfg.ALLOWED_CONTAINERS[:-1])} or {cfg.ALLOWED_CONTAINERS[-1]} file",
+            f"{cfg.MAX_UPLOAD_BYTES / config.MIB:g} MB or smaller"]
+    key = ('<label for="gemini_key">Your Gemini API key</label>'
+           f'<input id="gemini_key" name="gemini_key" type="password" maxlength="{MAX_KEY_CHARS}" autocomplete="off" required>'
+           '<p class="note">Used for this one video only and never stored.</p>') if pay == "key" else ""
     return (
         '<form method="post" enctype="multipart/form-data">'
         '<label for="video">Video file</label>'
         '<input id="video" name="video" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" required>'
-        '<ul class="chips">' + "".join(f"<li>{html.escape(c)}</li>" for c in chips) + "</ul>"
-        '<label for="gemini_key">Your own Gemini API key (optional)</label>'
-        f'<input id="gemini_key" name="gemini_key" type="password" maxlength="{MAX_KEY_CHARS}" autocomplete="off" '
-        'placeholder="Leave empty to use a free draft">'
-        '<p class="note">Leave empty to use one of your free drafts for today. With your own key the analysis is paid '
-        'by your key; it is used for this one video only and is never stored.</p>'
-        '<button type="submit">Analyse my Short</button></form>'
-        '<ol class="steps"><li>Upload the draft here.</li><li>Go back to the chat and say you are done.</li>'
-        '<li>The publish plan is ready in about 3 minutes.</li></ol>')
+        '<div class="reqs"><p>Make sure it is:</p><ul>' + "".join(f"<li>{html.escape(r)}</li>" for r in reqs) + "</ul></div>"
+        + key + '<button class="go" type="submit">Upload</button></form>')
 
 
-def page(status: int, message: str | None = None, form: str | None = None, extra: str | None = None) -> Response:
-    tone = "ok" if status < 300 else "bad"
-    parts = [f'<p class="msg {tone}">{html.escape(message, quote=False)}</p>' if message else "",
-             f'<p class="note">{html.escape(extra, quote=False)}</p>' if extra else "", form or ""]
+def page(status: int, message: str | None = None, form: str | None = None, extra: str | None = None,
+         title: str = TITLE_UPLOAD, back: bool = False, foot: bool = True) -> Response:
+    """One page of the upload flow. A message with a 2xx status is the finished state (animated check mark, no
+    title); any other message is an error line above the form."""
+    said = html.escape(message, quote=False) if message else ""
+    if message and status < 300:
+        main = f'<div class="done">{DONE_MARK}<p class="msg">{said}</p></div>'
+    else:
+        main = (('<form method="get"><button class="back">&lsaquo; Back</button></form>' if back else "")
+                + f"<h1>{title}</h1>" + (f'<p class="msg bad">{said}</p>' if message else "")
+                + (f'<p class="note">{html.escape(extra, quote=False)}</p>' if extra else "") + (form or ""))
     body = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Upload your draft Short</title>'
-            f'<style>{STYLE}</style></head><body><main class="card"><div class="brand">Shorts Pre-Publish Copilot</div>'
-            "<h1>Upload your draft Short</h1>"
-            '<p class="lead">See how your viewers are likely to watch it before you post.</p>'
-            f"{''.join(parts)}"
-            '<p class="foot">Your video is deleted from the server as soon as the analysis is finished.</p>'
-            "</main></body></html>")
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{TITLE_UPLOAD}</title>'
+            f'<style>{STYLE}</style></head><body><main class="card">{main}'
+            + ('<p class="foot">Your video is deleted from the server as soon as the analysis is finished.</p>' if foot else "")
+            + "</main></body></html>")
     return Response(body, status_code=status, media_type="text/html; charset=utf-8", headers=SECURITY_HEADERS)
 
 
@@ -708,8 +749,12 @@ def upload_routes(state: AppState) -> list[Route]:
         if await is_open(request) is None:
             info.outcome = "not_found"
             return plain(404, MSG_LINK_GONE)
+        pay = request.query_params.get("pay")
+        if pay not in PAY_MODES:
+            info.outcome = "choose"
+            return page(200, form=_choice(cfg), title=TITLE_CHOOSE, foot=False)
         info.outcome = "form"
-        return page(200, form=_form(cfg))
+        return page(200, form=_form(cfg, pay), back=True)
 
     async def receive(request: Request) -> Response:
         info: RequestInfo = request.scope["so"]
@@ -718,15 +763,16 @@ def upload_routes(state: AppState) -> list[Route]:
         if upload_id is None:
             info.outcome = "not_found"
             return plain(404, MSG_LINK_GONE)
+        pay = request.query_params.get("pay")
         kind, options = parse_options_header(request.headers.get("content-type", ""))
         boundary = options.get(b"boundary", b"")
         if kind != b"multipart/form-data" or not boundary or len(boundary) > 200:
             info.outcome = "refused:bad_form"
-            return page(400, MSG_BAD_FORM, _form(cfg))
+            return page(400, MSG_BAD_FORM, _form(cfg, pay), back=True)
         declared = request.headers.get("content-length", "")
         if declared.isdigit() and int(declared) > cfg.MAX_UPLOAD_BYTES + MAX_FORM_OVERHEAD_BYTES:
             info.outcome = "refused:too_large"
-            return page(413, media.default_message("too_large", cfg), _form(cfg), MSG_TRY_AGAIN)
+            return page(413, media.default_message("too_large", cfg), _form(cfg, pay), MSG_TRY_AGAIN, back=True)
         try:
             draft = await thread(store.claim_upload, upload_id)
         except UploadUnavailable:
@@ -751,6 +797,8 @@ def upload_routes(state: AppState) -> list[Route]:
             except (MultipartParseError, FileExistsError):
                 raise Refusal("bad_form", MSG_BAD_FORM, 400) from None
             own_key = form.take_key()
+            if pay == "key" and not own_key:
+                raise Refusal("no_key", MSG_NO_KEY, 400)
             if not form.file_seen or size == 0:
                 raise Refusal("no_file", MSG_NO_FILE, 400)
             await thread(media.validate, dest, cfg)
@@ -790,10 +838,33 @@ def upload_routes(state: AppState) -> list[Route]:
         info.outcome = refusal.outcome
         state.refusals.put(draft.id, refusal.message)
         if await thread(store.upload_open, upload_id):
-            return page(refusal.status, refusal.message, _form(cfg), MSG_TRY_AGAIN)
+            if refusal.outcome in ("bad_key", "limit:user_daily", "limit:day_cap", "limit:month_cap"):
+                pay = "key"
+            return page(refusal.status, refusal.message, _form(cfg, pay), MSG_TRY_AGAIN, back=True)
         return page(refusal.status, refusal.message, extra=None if refusal.message == MSG_NEW_LINK else MSG_NEW_LINK)
 
     return [Route("/u/{upload_id:path}", show, methods=["GET"]), Route("/u/{upload_id:path}", receive, methods=["POST"])]
+
+
+ASSETS = Path(__file__).parent / "assets"
+ICON_FILES = {"/icon.png": ("icon.png", "image/png"), "/apple-touch-icon.png": ("icon.png", "image/png"),
+              "/icon.svg": ("icon.svg", "image/svg+xml"), "/favicon.svg": ("icon.svg", "image/svg+xml"),
+              "/favicon.ico": ("favicon.ico", "image/x-icon")}
+
+
+def icon_routes() -> list[Route]:
+    """The connector's logo (orange square, white play mark): public, the only files the server hands out."""
+    def route(path: str, name: str, mime: str) -> Route:
+        data = (ASSETS / name).read_bytes()
+
+        async def icon(request: Request) -> Response:
+            info: RequestInfo = request.scope["so"]
+            info.route, info.outcome = "/icon", "icon"
+            return Response(data, media_type=mime, headers={"X-Content-Type-Options": "nosniff",
+                                                            "Cache-Control": "public, max-age=86400",
+                                                            "Cross-Origin-Resource-Policy": "cross-origin"})
+        return Route(path, icon, methods=["GET"])
+    return [route(path, name, mime) for path, (name, mime) in ICON_FILES.items()]
 
 
 class Body:
@@ -881,7 +952,7 @@ def build_app(cfg: config.Config, *, analyze: Callable | None = None, warm: Call
                 tg.cancel_scope.cancel()
                 runner.shutdown(wait=False)
 
-    routes = [Route("/mcp", endpoint=McpAuth(state, manager.handle_request)), *upload_routes(state)]
+    routes = [Route("/mcp", endpoint=McpAuth(state, manager.handle_request)), *upload_routes(state), *icon_routes()]
     if allow_path_token:
         routes.append(Route("/t/{token}/mcp", endpoint=McpAuth(state, manager.handle_request, path_token=True)))
     return RequestLog(Starlette(debug=False, routes=routes, lifespan=lifespan), state)

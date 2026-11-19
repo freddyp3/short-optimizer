@@ -281,7 +281,7 @@ def start_draft(ctx: Ctx) -> dict:
     return fit({
         "status": WAITING if left else LIMIT_OWN_KEY, "draft_id": draft.id, "upload_url": f"{cfg.PUBLIC_BASE_URL}/u/{draft.upload_id}",
         "expires_in_s": max(0, int(draft.upload_expires_at - draft.created_at)), "limits": _limits(cfg), "usage": usage,
-        "message": (f"{lead}Show the user the upload_url as a link and ask them to upload the video there, then to tell you "
+        "message": (f"{lead}Give the user the upload_url as a markdown link with the text \"One-time upload link\" (never the bare address) and ask them to upload the video there, then to tell you "
                     f"when it is done. The link works once and for {cfg.UPLOAD_TTL_S // 60} minutes. Accepted: "
                     f"{', '.join(cfg.ALLOWED_CONTAINERS)}; {cfg.MIN_DURATION_S:g}-{cfg.MAX_DURATION_S:g} seconds; vertical "
                     f"or square; up to {cfg.MAX_UPLOAD_BYTES / config.MIB:g} MB. {note}The video is deleted after the "

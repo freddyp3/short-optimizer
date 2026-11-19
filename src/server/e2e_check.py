@@ -350,7 +350,7 @@ async def f4(run: Run) -> tuple[str, str]:
     if limits.get("min_duration_s") != 8 or limits.get("max_duration_s") != 60:
         problems.append("limits do not state 8-60 s")
     if url:
-        r = await fetch_page(url)
+        r = await fetch_page(url + "?pay=key")
         notes.append(f"upload page {r.status_code}, {len(r.content)} bytes")
         if r.status_code != 200:
             problems.append(f"upload page status {r.status_code}")
