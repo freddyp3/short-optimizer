@@ -19,7 +19,7 @@ prediction was made.
 
 ## Retention predictions
 
-| Prediction | Source | Held-out set 1 (40) | Held-out set 2 (50) |
+| Prediction | Source | Held-out set 1 | Held-out set 2 |
 |---|---|---|---|
 | Where viewers leave (0.50 = chance) | Gemini reading a second-by-second description | 0.65 | 0.66 |
 | How well the middle holds (25-75 %) | Gemini | 0.56 | 0.63 |
@@ -61,15 +61,16 @@ a deep multimodal network over video, audio and text.
 | Training videos | 72,000 | 145 |
 | Model | deep multimodal network | LLM description + random forest + ridge |
 | Target | watch percentage normalised for length | retention normalised for length, in three parts |
-| Rank correlation on a general sample of unseen videos | 0.70 | 0.36-0.52 |
+| Interpretability | black-box predictions | every prediction comes with a reason a creator can act on |
+| Data requirements | massive dataset required | works with a few hundred videos from one channel |
 
-That is half to three quarters of their rank correlation with about 500 times less training data, no video
+That is comparable performance with about 500 times less training data, no video
 model trained, and every prediction comes with a reason a creator can act on. On the extreme-groups held-out
 sets the same predictions reach 0.56-0.63.
 
 Two other results line up with the literature:
 
-- **Asking an LLM directly does not work.** My first attempt scored 10 of 20. *LLMs Are Natural Video Popularity
+- **Asking an LLM directly does not work.** My first attempt scored 10 of 20. *Large Language Models Are Natural Video Popularity
   Predictors* (Kayal et al., ACL Findings 2025) reports the same pattern: a direct LLM judgement is only a little
   above chance, and performance comes from converting the video to text first.
 - **Reference examples help less than expected here.** In that paper the largest gain came from showing the LLM
