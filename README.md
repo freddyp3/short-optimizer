@@ -15,7 +15,7 @@ I built and use this for my own Brawl Stars channel ([@alfie369k](https://www.yo
 Channel stats:
 - 46.7M views
 - 393.6K watch time hours
-- 38.7K subscribers
+- 37.7K subscribers
 - 1.8M likes
 
 ## How it works
